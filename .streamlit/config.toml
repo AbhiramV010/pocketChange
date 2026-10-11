@@ -1,0 +1,6 @@
+# Dashboard theme. Fonts load from Google Fonts; without internet the fallbacks are used.
+[theme]
+base = "dark"
+font = "'Share Tech':https://fonts.googleapis.com/css2?family=Share+Tech&display=swap, sans-serif"
+headingFont = "'Share Tech':https://fonts.googleapis.com/css2?family=Share+Tech&display=swap, sans-serif"
+codeFont = "'Share Tech Mono':https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap, monospace"

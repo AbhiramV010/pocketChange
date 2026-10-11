@@ -28,6 +28,15 @@ MAX_CHART_POINTS = 2000
 RANGES = {"24h": timedelta(hours=24), "7d": timedelta(days=7), "30d": timedelta(days=30), "All": None}
 
 st.set_page_config(page_title="pocketchange", page_icon=":moneybag:", layout="wide")
+st.markdown(  # the STOP button is always red, whatever the theme
+    """<style>
+    .st-key-emergency_stop button { background:#d32f2f; border-color:#d32f2f; color:#fff; font-weight:700;
+                                    letter-spacing:.12em; }
+    .st-key-emergency_stop button:hover { background:#b71c1c; border-color:#b71c1c; color:#fff; }
+    .st-key-emergency_stop button:disabled { background:#5c2a2a; border-color:#5c2a2a; color:#d9b3b3; }
+    </style>""",
+    unsafe_allow_html=True,
+)
 
 
 def set_pause_from_toggle() -> None:
@@ -36,6 +45,15 @@ def set_pause_from_toggle() -> None:
         return
     with closing(db.connect(settings.db_path)) as conn:
         db.set_paused(conn, bool(st.session_state["pause_toggle"]))
+
+
+def emergency_stop() -> None:
+    """STOP button: pause trading immediately (the same single flag the dashboard may write)."""
+    if PUBLIC:
+        return
+    with closing(db.connect(settings.db_path)) as conn:
+        db.set_paused(conn, True)
+    st.toast("Trading stopped. Resume with the pause toggle.", icon=":material/block:")
 
 
 def position_summary(trades: pd.DataFrame) -> tuple[float, float, float]:
@@ -110,7 +128,18 @@ def live_view() -> None:
             "Only `python -m bot.reset_halt` can clear this; the dashboard cannot."
         )
 
-    st.title("pocketchange")
+    title, stop = st.columns([5, 1], vertical_alignment="center")
+    title.title("pocketchange")
+    if not PUBLIC:
+        stop.button(
+            "STOP",
+            key="emergency_stop",
+            on_click=emergency_stop,
+            disabled=paused or halted,
+            help="Emergency stop: pauses trading now. The bot checks this right before any swap. "
+            "Resume with the pause toggle.",
+            width="stretch",
+        )
     top = st.columns([2, 2, 3])
     with top[0]:
         if dry_run:

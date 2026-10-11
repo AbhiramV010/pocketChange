@@ -185,3 +185,14 @@ def test_pause_callback_refuses_in_public_mode(public_app, monkeypatch):
     st.session_state["pause_toggle"] = True
     module.set_pause_from_toggle()
     assert not db.is_paused(db.connect(public_app))
+
+
+def test_stop_button_pauses_trading(app):
+    seed(app)
+    at = run_app()
+    stop = at.button(key="emergency_stop")
+    assert stop.label == "STOP" and not stop.disabled
+    stop.click().run()
+    assert db.is_paused(db.connect(app))
+    assert at.button(key="emergency_stop").disabled  # already stopped
+    assert at.toggle[0].value is True  # the pause toggle reflects it, and is how to resume
