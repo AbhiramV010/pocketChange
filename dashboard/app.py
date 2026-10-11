@@ -34,26 +34,20 @@ st.markdown(  # the STOP button is always red, whatever the theme
                                     letter-spacing:.12em; }
     .st-key-emergency_stop button:hover { background:#b71c1c; border-color:#b71c1c; color:#fff; }
     .st-key-emergency_stop button:disabled { background:#5c2a2a; border-color:#5c2a2a; color:#d9b3b3; }
+    .st-key-resume button { background:#2e7d32; border-color:#2e7d32; color:#fff; font-weight:700; letter-spacing:.12em; }
+    .st-key-resume button:hover { background:#1b5e20; border-color:#1b5e20; color:#fff; }
     </style>""",
     unsafe_allow_html=True,
 )
 
 
-def set_pause_from_toggle() -> None:
-    """Callback for the pause toggle: the dashboard's only write. Never runs in public mode."""
+def set_paused(paused: bool) -> None:
+    """STOP / RESUME button: the dashboard's only write. Never runs in public mode."""
     if PUBLIC:
         return
     with closing(db.connect(settings.db_path)) as conn:
-        db.set_paused(conn, bool(st.session_state["pause_toggle"]))
-
-
-def emergency_stop() -> None:
-    """STOP button: pause trading immediately (the same single flag the dashboard may write)."""
-    if PUBLIC:
-        return
-    with closing(db.connect(settings.db_path)) as conn:
-        db.set_paused(conn, True)
-    st.toast("Trading stopped. Resume with the pause toggle.", icon=":material/block:")
+        db.set_paused(conn, paused)
+    st.toast("Trading stopped." if paused else "Trading resumed.", icon=":material/block:" if paused else ":material/play_arrow:")
 
 
 def position_summary(trades: pd.DataFrame) -> tuple[float, float, float]:
@@ -76,28 +70,11 @@ def signed_usd(value: float) -> str:
     return f"{'-' if value < 0 else '+'}${abs(value):,.2f}"
 
 
-def seconds_since(iso: str | None) -> float | None:
-    if not iso:
-        return None
-    return (datetime.now(timezone.utc) - datetime.fromisoformat(iso)).total_seconds()
-
-
 def banner(text: str) -> None:
     st.markdown(
         "<div style='background:#c62828;color:#fff;padding:14px 18px;border-radius:6px;"
         f"font-weight:600;margin-bottom:12px'>{html.escape(text)}</div>",
         unsafe_allow_html=True,
-    )
-
-
-def render_pause_toggle(paused: bool, halted: bool) -> None:
-    st.session_state["pause_toggle"] = paused  # always mirror the database
-    st.toggle(
-        "Pause trading (takes effect within one bot cycle)",
-        key="pause_toggle",
-        on_change=set_pause_from_toggle,
-        disabled=halted,
-        help="Disabled while halted. A paused bot keeps logging balances.",
     )
 
 
@@ -110,7 +87,6 @@ def live_view() -> None:
         halted, reason = db.is_halted(conn), db.halt_reason(conn)
         paused = db.is_paused(conn)
         mode_flag = db.get_state(conn, db.DRY_RUN)
-        heartbeat = db.get_state(conn, db.HEARTBEAT)
         trades_all = db.read_trades(conn)
         range_choice = st.session_state.get("range", "7d")
         window = RANGES[range_choice]
@@ -128,37 +104,20 @@ def live_view() -> None:
             "Only `python -m bot.reset_halt` can clear this; the dashboard cannot."
         )
 
-    title, stop = st.columns([5, 1], vertical_alignment="center")
+    title, button = st.columns([5, 1], vertical_alignment="center")
     title.title("pocketchange")
     if not PUBLIC:
-        stop.button(
-            "STOP",
-            key="emergency_stop",
-            on_click=emergency_stop,
-            disabled=paused or halted,
-            help="Emergency stop: pauses trading now. The bot checks this right before any swap. "
-            "Resume with the pause toggle.",
-            width="stretch",
-        )
-    # Status line between two rules: mode, bot heartbeat, pause control.
-    st.divider()
-    top = st.columns([2, 2, 3], vertical_alignment="center")
-    if dry_run:
-        top[0].markdown(":orange[**DRY RUN**] · simulated, nothing on-chain")
-    else:
-        top[0].markdown(":red[**LIVE**] · real funds on Solana")
-    age = seconds_since(heartbeat)
-    if age is None:
-        top[1].markdown(":gray[Bot has not reported yet]")
-    elif age > max(180, settings.loop_interval_seconds * 3):
-        top[1].markdown(f":red[**Bot silent** for {age / 60:.0f} min]" + ("" if PUBLIC else " · is `bot.run` running?"))
-    else:
-        top[1].markdown(f":green[**Bot alive**] · last cycle {age:.0f}s ago")
-    with top[2]:
-        if PUBLIC:
-            st.markdown(":orange[**Trading paused**]" if paused else ":green[**Trading active**]")
+        if paused:
+            button.button(
+                "RESUME", key="resume", on_click=set_paused, args=(False,), disabled=halted, width="stretch",
+                help="Trading is stopped. Resume it." if not halted else "Halted: only bot.reset_halt can clear this.",
+            )
         else:
-            render_pause_toggle(paused, halted)
+            button.button(
+                "STOP", key="emergency_stop", on_click=set_paused, args=(True,), disabled=halted, width="stretch",
+                help="Emergency stop: pauses trading now. The bot checks this right before any swap.",
+            )
+    st.divider()
     st.divider()
 
     trades = trades_all[trades_all["simulated"] == dry_run]

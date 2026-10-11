@@ -53,7 +53,6 @@ def test_no_database_shows_hint(app):
 def test_shows_dry_run_indicator_balances_and_trade_log(app):
     seed(app)
     at = run_app()
-    assert "DRY RUN" in text(at)
     labels = {m.label: m.value for m in at.metric}
     assert labels["USDC"] == "15.00" and labels["wSOL"] == "0.002000"
     assert labels["Equity (USDC + wSOL)"] == "$20.20"
@@ -61,33 +60,33 @@ def test_shows_dry_run_indicator_balances_and_trade_log(app):
     assert not any("BOT HALTED" in m.value for m in at.markdown)
 
 
-def test_live_indicator(app):
-    seed(app, dry_run=False)
+def test_status_bar_is_gone(app):
+    seed(app)
     at = run_app()
-    assert "LIVE" in text(at) and "DRY RUN" not in text(at)
-
+    assert len(at.toggle) == 0
+    assert not any("DRY RUN" in m.value or "Bot alive" in m.value for m in at.markdown)
+    assert len(at.get("divider")) >= 2
 
 def test_halted_shows_red_banner_and_cannot_be_cleared(app):
     seed(app, halted=True)
     at = run_app()
     banner = [m.value for m in at.markdown if "BOT HALTED" in m.value]
     assert banner and "#c62828" in banner[0] and "MIN_EQUITY_USD" in banner[0]
-    assert at.toggle[0].disabled
+    assert at.button(key="emergency_stop").disabled
     conn = db.connect(app)
     assert db.is_halted(conn)
 
 
-def test_pause_toggle_writes_only_the_pause_flag(app):
+def test_stop_and_resume_write_only_the_pause_flag(app):
     seed(app)
     conn = db.connect(app)
     before_state = dict(conn.execute("SELECT key, value FROM state").fetchall())
     trades_before = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
 
     at = run_app()
-    assert at.toggle[0].value is False
-    at.toggle[0].set_value(True).run()
+    at.button(key="emergency_stop").click().run()
     assert db.is_paused(conn)
-    at.toggle[0].set_value(False).run()
+    at.button(key="resume").click().run()
     assert not db.is_paused(conn)
 
     after_state = dict(conn.execute("SELECT key, value FROM state").fetchall())
@@ -95,11 +94,10 @@ def test_pause_toggle_writes_only_the_pause_flag(app):
     assert changed <= {db.PAUSED}
     assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == trades_before
 
-
-def test_toggle_mirrors_flag_set_elsewhere(app):
+def test_button_mirrors_flag_set_elsewhere(app):
     seed(app, paused=True)
-    assert run_app().toggle[0].value is True
-
+    at = run_app()
+    assert at.button(key="resume").label == "RESUME"
 
 # --- static isolation rules ------------------------------------------------------
 
@@ -158,7 +156,6 @@ def test_public_mode_has_no_controls_and_writes_nothing(public_app):
     before = snapshot()
     at = run_app()
     assert len(at.toggle) == 0 and len(at.button) == 0
-    assert any("Trading active" in m.value for m in at.markdown)
     shown = at.dataframe[0].value
     assert "tx" not in shown.columns and "tx_hash" not in shown.columns
     assert "5SecretWalletRevealingSig" not in shown.to_string()
@@ -180,12 +177,9 @@ def test_pause_callback_refuses_in_public_mode(public_app, monkeypatch):
     spec = importlib.util.spec_from_file_location("public_dashboard", APP)
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setattr(st, "fragment", lambda **kw: (lambda fn: fn))
-    monkeypatch.setattr(module, "__name__", "public_dashboard", raising=False)
     spec.loader.exec_module(module)
-    st.session_state["pause_toggle"] = True
-    module.set_pause_from_toggle()
+    module.set_paused(True)
     assert not db.is_paused(db.connect(public_app))
-
 
 def test_stop_button_pauses_trading(app):
     seed(app)
@@ -194,5 +188,5 @@ def test_stop_button_pauses_trading(app):
     assert stop.label == "STOP" and not stop.disabled
     stop.click().run()
     assert db.is_paused(db.connect(app))
-    assert at.button(key="emergency_stop").disabled  # already stopped
-    assert at.toggle[0].value is True  # the pause toggle reflects it, and is how to resume
+    assert at.button(key="resume").label == "RESUME"  # same spot now resumes
+
