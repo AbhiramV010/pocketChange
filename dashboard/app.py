@@ -20,7 +20,7 @@ import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 
 from bot import db  # noqa: E402
-from bot.config import settings  # noqa: E402
+from bot.config import DASHBOARD_TIMEFRAMES, TIMEFRAME, settings  # noqa: E402
 
 PUBLIC = settings.dashboard_public
 REFRESH = "5s"
@@ -48,6 +48,16 @@ def set_paused(paused: bool) -> None:
     with closing(db.connect(settings.db_path)) as conn:
         db.set_paused(conn, paused)
     st.toast("Trading stopped." if paused else "Trading resumed.", icon=":material/block:" if paused else ":material/play_arrow:")
+
+
+def set_timeframe() -> None:
+    """Timeframe switch: the bot picks it up on its next cycle. Never runs in public mode."""
+    choice = st.session_state.get("timeframe")
+    if PUBLIC or choice not in DASHBOARD_TIMEFRAMES:
+        return
+    with closing(db.connect(settings.db_path)) as conn:
+        db.set_timeframe(conn, choice)
+    st.toast(f"Trading on {choice} candles from the next cycle.", icon=":material/schedule:")
 
 
 def position_summary(trades: pd.DataFrame) -> tuple[float, float, float]:
@@ -86,6 +96,7 @@ def live_view() -> None:
     with closing(db.connect(settings.db_path, readonly=True)) as conn:
         halted, reason = db.is_halted(conn), db.halt_reason(conn)
         paused = db.is_paused(conn)
+        timeframe = db.get_timeframe(conn) or TIMEFRAME
         mode_flag = db.get_state(conn, db.DRY_RUN)
         trades_all = db.read_trades(conn)
         range_choice = st.session_state.get("range", "7d")
@@ -118,6 +129,16 @@ def live_view() -> None:
                 help="Emergency stop: pauses trading now. The bot checks this right before any swap.",
             )
     st.divider()
+    st.session_state["timeframe"] = timeframe  # always mirror the database
+    st.segmented_control(
+        "Timeframe",
+        DASHBOARD_TIMEFRAMES,
+        key="timeframe",
+        on_change=set_timeframe,
+        disabled=PUBLIC,
+        label_visibility="collapsed",
+        help="Candle size the bot trades on. Shorter means more trades and more fees.",
+    )
     st.divider()
 
     trades = trades_all[trades_all["simulated"] == dry_run]

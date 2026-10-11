@@ -47,7 +47,7 @@ class Rig:
         self.feed_error: Exception | None = None
         self.ctx = Context(cfg, conn, broker or SimBroker(conn, cfg), feed=self._feed, clock=lambda: self.now)
 
-    def _feed(self):
+    def _feed(self, timeframe="1h"):
         self.feed_calls += 1
         if self.feed_error:
             raise self.feed_error
@@ -130,8 +130,8 @@ def test_pause_flipped_mid_cycle_still_stops_the_swap(conn):
     rig = Rig(conn, buy_signal_series())
     original = rig._feed
 
-    def feed_then_pause():
-        frame = original()
+    def feed_then_pause(timeframe="1h"):
+        frame = original(timeframe)
         db.set_paused(conn, True)  # user clicks pause after the top-of-cycle check
         return frame
 
@@ -271,3 +271,21 @@ def test_sim_broker_charges_costs_and_enforces_limits(conn):
         sim.swap("buy", CFG.max_trade_usdc + 1, 2500.0)
     with pytest.raises(chain.SwapFailed):
         sim.swap("sell", 1.0, 2500.0)  # no wSOL
+
+
+def test_bot_follows_timeframe_chosen_on_dashboard(conn):
+    rig = Rig(conn, [100.0] * 72)
+    seen = []
+    original = rig._feed
+    rig.ctx.feed = lambda tf: seen.append(tf) or original(tf)
+    rig.cycle()
+    db.set_timeframe(conn, "5m")
+    rig.cycle()
+    assert seen == ["1h", "5m"]
+
+
+def test_invalid_timeframe_is_rejected(conn):
+    with pytest.raises(ValueError):
+        db.set_timeframe(conn, "1s")
+    db.set_state(conn, db.TIMEFRAME, "bogus")  # a bad value never reaches the bot
+    assert db.get_timeframe(conn) is None

@@ -14,12 +14,16 @@ from pathlib import Path
 import ccxt
 import pandas as pd
 
-from bot.config import CANDLE_FREQ, SYMBOL, TIMEFRAME, settings
+from bot.config import CANDLE_FREQ, SYMBOL, TIMEFRAME, candle_freq, settings
 
 log = logging.getLogger(__name__)
 
 COLUMNS = ["open", "high", "low", "close", "volume"]
 CANDLE = pd.Timedelta(CANDLE_FREQ)
+
+
+def candle_delta(timeframe: str) -> pd.Timedelta:
+    return pd.Timedelta(candle_freq(timeframe))
 PAGE_LIMIT = 1000
 MAX_PAGES = 200
 # Tried in order after the configured exchange. All list SOL/USDC.
@@ -51,15 +55,17 @@ def to_frame(rows: list[list[float]]) -> pd.DataFrame:
     return df[~df.index.duplicated(keep="last")].sort_index()
 
 
-def download(since: datetime, exchange_id: str, until: datetime | None = None) -> pd.DataFrame:
+def download(
+    since: datetime, exchange_id: str, until: datetime | None = None, timeframe: str = TIMEFRAME
+) -> pd.DataFrame:
     """Page through one exchange's history from `since`."""
     ex = _exchange(exchange_id)
     until_ms = int((until or datetime.now(timezone.utc)).timestamp() * 1000)
     cursor = int(since.timestamp() * 1000)
-    step = int(CANDLE.total_seconds() * 1000)
+    step = int(candle_delta(timeframe).total_seconds() * 1000)
     rows: list[list[float]] = []
     for _ in range(MAX_PAGES):
-        page = ex.fetch_ohlcv(SYMBOL, TIMEFRAME, since=cursor, limit=PAGE_LIMIT)
+        page = ex.fetch_ohlcv(SYMBOL, timeframe, since=cursor, limit=PAGE_LIMIT)
         if not page:
             break
         rows.extend(page)
@@ -72,11 +78,11 @@ def download(since: datetime, exchange_id: str, until: datetime | None = None) -
     return to_frame(rows)
 
 
-def _download_with_fallback(since: datetime, preferred: str | None) -> pd.DataFrame:
+def _download_with_fallback(since: datetime, preferred: str | None, timeframe: str = TIMEFRAME) -> pd.DataFrame:
     errors = []
     for exchange_id in _exchange_order(preferred):
         try:
-            df = download(since, exchange_id)
+            df = download(since, exchange_id, timeframe=timeframe)
             log.debug("candles: %d rows from %s", len(df), exchange_id)
             return df
         except Exception as exc:  # network, rate limit, geo-block, unknown market
@@ -85,16 +91,16 @@ def _download_with_fallback(since: datetime, preferred: str | None) -> pd.DataFr
     raise DataError("all candle sources failed: " + "; ".join(errors))
 
 
-def fetch_recent(limit: int = 120, exchange_id: str | None = None) -> pd.DataFrame:
+def fetch_recent(limit: int = 120, exchange_id: str | None = None, timeframe: str = TIMEFRAME) -> pd.DataFrame:
     """Latest `limit` candles including the still-forming one."""
-    since = datetime.now(timezone.utc) - CANDLE * (limit + 1)
-    return _download_with_fallback(since, exchange_id).tail(limit)
+    since = datetime.now(timezone.utc) - candle_delta(timeframe) * (limit + 1)
+    return _download_with_fallback(since, exchange_id, timeframe).tail(limit)
 
 
-def closed_only(df: pd.DataFrame, now: datetime | None = None) -> pd.DataFrame:
+def closed_only(df: pd.DataFrame, now: datetime | None = None, timeframe: str = TIMEFRAME) -> pd.DataFrame:
     """Drop the candle that is still forming."""
     now_ts = pd.Timestamp(now or datetime.now(timezone.utc))
-    return df[df.index + CANDLE <= now_ts]
+    return df[df.index + candle_delta(timeframe) <= now_ts]
 
 
 def load_cache(path: Path | None = None) -> pd.DataFrame:

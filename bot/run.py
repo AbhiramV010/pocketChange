@@ -22,7 +22,7 @@ from typing import IO, Callable, Protocol
 import pandas as pd
 
 from bot import chain, data, db
-from bot.config import FEE_RATE, MIN_TRADE_USDC, SLIPPAGE_RATE, SMA_SLOW, Settings, settings
+from bot.config import FEE_RATE, MIN_TRADE_USDC, SLIPPAGE_RATE, SMA_SLOW, TIMEFRAME, Settings, settings
 from bot.db import Balances, Fill
 from bot.strategy import Signal, dca_signal, size_trade, sma_crossover_signal
 
@@ -30,7 +30,9 @@ log = logging.getLogger("bot")
 
 MAX_SWAP_RETRIES = 1  # hard rule: a failed swap is retried at most once per cycle
 MAX_ATTEMPT_CYCLES = 3  # cycles that may try the same signal before giving up on it
-MAX_DATA_AGE = max(data.CANDLE * 2, pd.Timedelta(minutes=15))  # older candles mean the feed is stale
+def max_data_age(timeframe: str) -> pd.Timedelta:
+    """Older candles than this mean the feed is stale."""
+    return max(data.candle_delta(timeframe) * 2, pd.Timedelta(minutes=15))
 CANDLES_WANTED = 120
 ALREADY_RUNNING_EXIT = 3  # exit code when another bot holds the instance lock
 
@@ -116,7 +118,7 @@ class Context:
     cfg: Settings
     conn: sqlite3.Connection
     broker: Broker
-    feed: Callable[[], pd.DataFrame]  # recent candles, including the one still forming
+    feed: Callable[[str], pd.DataFrame]  # timeframe -> recent candles, including the one still forming
     clock: Callable[[], datetime] = field(default=_utc_now)
 
 
@@ -130,9 +132,10 @@ def run_cycle(ctx: Context) -> None:
     db.set_state(conn, db.DRY_RUN, "1" if cfg.dry_run else "0")
 
     paused, halted = db.is_paused(conn), db.is_halted(conn)  # top of the cycle (hard rule 6)
+    timeframe = db.get_timeframe(conn) or TIMEFRAME  # the dashboard can switch it live
 
     balances = ctx.broker.balances()
-    candles, price = _market(ctx, now)
+    candles, price = _market(ctx, now, timeframe)
     db.insert_balance(conn, balances, price, cfg.dry_run, timestamp=stamp)
     if price is None:
         log.warning("no usable price; not trading this cycle")
@@ -146,17 +149,17 @@ def run_cycle(ctx: Context) -> None:
     if paused:
         log.info("paused; not trading (usdc=%.2f wsol=%.6f price=%.2f)", balances.usdc, balances.wsol, price)
         return
-    _trade_if_signal(ctx, candles, balances, price, now)
+    _trade_if_signal(ctx, candles, balances, price, now, timeframe)
 
 
-def _market(ctx: Context, now: datetime) -> tuple[pd.DataFrame, float | None]:
+def _market(ctx: Context, now: datetime, timeframe: str) -> tuple[pd.DataFrame, float | None]:
     """Latest candles and the current price, or (empty, None) if the feed is down or stale."""
     try:
-        candles = ctx.feed()
+        candles = ctx.feed(timeframe)
     except Exception as exc:  # network, rate limit, exchange outage
         log.error("candle feed failed: %s: %s", type(exc).__name__, str(exc)[:200])
         return pd.DataFrame(), None
-    if candles.empty or pd.Timestamp(now) - candles.index[-1] > MAX_DATA_AGE:
+    if candles.empty or pd.Timestamp(now) - candles.index[-1] > max_data_age(timeframe):
         log.error("candle feed is stale (latest %s)", candles.index[-1] if len(candles) else "none")
         return candles, None
     return candles, float(candles["close"].iloc[-1])
@@ -178,19 +181,21 @@ def _enforce_equity_floor(ctx: Context, balances: Balances, price: float) -> boo
     return True
 
 
-def _trade_if_signal(ctx: Context, candles: pd.DataFrame, balances: Balances, price: float, now: datetime) -> None:
+def _trade_if_signal(
+    ctx: Context, candles: pd.DataFrame, balances: Balances, price: float, now: datetime, timeframe: str = TIMEFRAME
+) -> None:
     cfg, conn = ctx.cfg, ctx.conn
-    closed = data.closed_only(candles, now)
+    closed = data.closed_only(candles, now, timeframe)
     if cfg.strategy == "sma":
         if len(closed) < SMA_SLOW + 1:
             log.info("warming up: %d of %d closed candles", len(closed), SMA_SLOW + 1)
             return
         signal = sma_crossover_signal(closed)
     else:
-        signal = dca_signal(closed, db.last_trade_time(conn, "buy", cfg.dry_run), cfg.dca_interval_hours)
+        signal = dca_signal(closed, db.last_trade_time(conn, "buy", cfg.dry_run), cfg.dca_interval_hours, timeframe)
     equity = equity_usd(balances, price)
     if signal is Signal.HOLD:
-        log.info("hold | price=%.2f equity=%.2f usdc=%.2f wsol=%.6f", price, equity, balances.usdc, balances.wsol)
+        log.info("hold | %s | price=%.2f equity=%.2f usdc=%.2f wsol=%.6f", timeframe, price, equity, balances.usdc, balances.wsol)
         return
 
     key = f"{closed.index[-1].isoformat()}:{signal.value}"
@@ -322,7 +327,9 @@ def main(argv: list[str] | None = None) -> None:
         log.warning("LIVE MODE: real transactions will be sent from %s", getattr(broker, "address", "?"))
     if db.is_halted(conn):
         log.warning("bot is HALTED: %s", db.halt_reason(conn))
-    ctx = Context(cfg, conn, broker, feed=lambda: data.fetch_recent(CANDLES_WANTED, cfg.candle_exchange))
+    ctx = Context(
+        cfg, conn, broker, feed=lambda tf: data.fetch_recent(CANDLES_WANTED, cfg.candle_exchange, timeframe=tf)
+    )
     install_stop_handlers()
     try:
         run_loop(ctx, once=args.once)

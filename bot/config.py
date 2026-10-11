@@ -35,8 +35,15 @@ class ConfigError(ValueError):
 
 if TIMEFRAME not in TIMEFRAMES:
     raise ConfigError(f"TIMEFRAME must be one of {TIMEFRAMES}, got {TIMEFRAME!r}")
-# pandas spelling of TIMEFRAME: to pandas "5m" means five *months*.
-CANDLE_FREQ = TIMEFRAME.replace("m", "min") if TIMEFRAME.endswith("m") else TIMEFRAME
+DASHBOARD_TIMEFRAMES = ("1m", "5m", "15m", "30m", "1h")  # choices on the dashboard switch
+
+
+def candle_freq(timeframe: str) -> str:
+    """pandas spelling of an exchange timeframe: to pandas "5m" means five *months*."""
+    return timeframe.replace("m", "min") if timeframe.endswith("m") else timeframe
+
+
+CANDLE_FREQ = candle_freq(TIMEFRAME)
 
 
 def _raw(env: Mapping[str, str], name: str) -> str | None:

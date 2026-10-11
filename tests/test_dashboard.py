@@ -190,3 +190,22 @@ def test_stop_button_pauses_trading(app):
     assert db.is_paused(db.connect(app))
     assert at.button(key="resume").label == "RESUME"  # same spot now resumes
 
+
+
+def test_timeframe_switch_writes_only_the_timeframe(app):
+    seed(app)
+    conn = db.connect(app)
+    at = run_app()
+    switch = at.get("button_group")[0]
+    assert switch.value == "1h"
+    before = dict(conn.execute("SELECT key, value FROM state").fetchall())
+    switch.set_value("5m").run()
+    after = dict(conn.execute("SELECT key, value FROM state").fetchall())
+    assert db.get_timeframe(conn) == "5m"
+    assert {k for k in set(before) | set(after) if before.get(k) != after.get(k)} == {db.TIMEFRAME}
+
+
+def test_public_timeframe_switch_is_read_only(public_app):
+    seed(public_app)
+    at = run_app()
+    assert at.get("button_group")[0].disabled

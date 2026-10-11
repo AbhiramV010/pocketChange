@@ -11,7 +11,7 @@ from enum import Enum
 
 import pandas as pd
 
-from bot.config import CANDLE_FREQ, SMA_FAST, SMA_SLOW
+from bot.config import SMA_FAST, SMA_SLOW, TIMEFRAME, candle_freq
 
 
 class Signal(str, Enum):
@@ -42,14 +42,17 @@ def sma_crossover_signal(candles: pd.DataFrame, fast: int = SMA_FAST, slow: int 
     return Signal.HOLD
 
 
-def dca_signal(candles: pd.DataFrame, last_buy_time: pd.Timestamp | None, interval_hours: float) -> Signal:
+def dca_signal(
+    candles: pd.DataFrame, last_buy_time: pd.Timestamp | None, interval_hours: float, timeframe: str = TIMEFRAME
+) -> Signal:
     """BUY when `interval_hours` have passed since the last buy (or there was none). Never sells."""
     if candles.empty:
         return Signal.HOLD
     if last_buy_time is None:
         return Signal.BUY
-    now = candles.index[-1] + pd.Timedelta(CANDLE_FREQ)  # close time of the latest closed candle
-    last = pd.Timestamp(last_buy_time).floor(CANDLE_FREQ)  # buys land mid-candle; compare on the candle grid
+    freq = candle_freq(timeframe)
+    now = candles.index[-1] + pd.Timedelta(freq)  # close time of the latest closed candle
+    last = pd.Timestamp(last_buy_time).floor(freq)  # buys land mid-candle; compare on the candle grid
     return Signal.BUY if now - last >= pd.Timedelta(hours=interval_hours) else Signal.HOLD
 
 

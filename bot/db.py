@@ -48,6 +48,7 @@ HALT_REASON = "halt_reason"
 HALTED_AT = "halted_at"
 DRY_RUN = "dry_run"
 HEARTBEAT = "heartbeat"
+TIMEFRAME = "timeframe"
 DONE_SIGNAL = "done_signal"
 ATTEMPT_SIGNAL = "attempt_signal"
 ATTEMPT_COUNT = "attempt_count"
@@ -116,6 +117,23 @@ def is_paused(conn: sqlite3.Connection) -> bool:
 def set_paused(conn: sqlite3.Connection, paused: bool) -> None:
     """The only write the dashboard is allowed to make."""
     set_state(conn, PAUSED, "1" if paused else "0")
+
+
+def get_timeframe(conn: sqlite3.Connection) -> str | None:
+    """Timeframe chosen on the dashboard, or None to use the TIMEFRAME setting."""
+    from bot.config import TIMEFRAMES
+
+    value = get_state(conn, TIMEFRAME)
+    return value if value in TIMEFRAMES else None
+
+
+def set_timeframe(conn: sqlite3.Connection, timeframe: str) -> None:
+    """The dashboard's second write: the candle timeframe the bot trades on."""
+    from bot.config import TIMEFRAMES
+
+    if timeframe not in TIMEFRAMES:
+        raise ValueError(f"timeframe must be one of {TIMEFRAMES}")
+    set_state(conn, TIMEFRAME, timeframe)
 
 
 def is_halted(conn: sqlite3.Connection) -> bool:
