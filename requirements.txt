@@ -1,0 +1,10 @@
+# Runtime
+solders>=0.21
+requests>=2.31
+ccxt>=4.4
+pandas>=2.2
+streamlit>=1.40
+python-dotenv>=1.0
+
+# Tests
+pytest>=8.0
