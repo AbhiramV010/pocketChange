@@ -18,8 +18,12 @@ load_dotenv(ROOT / ".env", override=False)
 SYMBOL = "SOL/USDC"
 TIMEFRAMES = ("1m", "5m", "15m", "30m", "1h", "4h")
 TIMEFRAME = (os.environ.get("TIMEFRAME") or "1h").strip().lower()  # candle size for strategies and backtests
-SMA_FAST = 20
-SMA_SLOW = 50
+SMA_FAST = int(os.environ.get("SMA_FAST") or 20)
+SMA_SLOW = int(os.environ.get("SMA_SLOW") or 50)
+# cross: buy/sell only on the candle where the averages cross (patient, few trades).
+# trend: be long whenever fast > slow, flat whenever fast < slow (aggressive, enters right away).
+ENTRY_MODES = ("cross", "trend")
+ENTRY = (os.environ.get("ENTRY") or "cross").strip().lower()
 MIN_TRADE_USDC = 1.0  # below this a trade is not worth the fees
 
 # Cost model shared by the backtest and the dry-run simulator.
@@ -33,6 +37,10 @@ class ConfigError(ValueError):
     """Raised for an invalid setting. Messages name the variable, never secrets."""
 
 
+if not 2 <= SMA_FAST < SMA_SLOW <= 500:
+    raise ConfigError(f"need 2 <= SMA_FAST < SMA_SLOW <= 500, got {SMA_FAST}/{SMA_SLOW}")
+if ENTRY not in ENTRY_MODES:
+    raise ConfigError(f"ENTRY must be one of {ENTRY_MODES}, got {ENTRY!r}")
 if TIMEFRAME not in TIMEFRAMES:
     raise ConfigError(f"TIMEFRAME must be one of {TIMEFRAMES}, got {TIMEFRAME!r}")
 DASHBOARD_TIMEFRAMES = ("1m", "5m", "15m", "30m", "1h")  # choices on the dashboard switch

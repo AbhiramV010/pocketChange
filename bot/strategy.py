@@ -11,7 +11,7 @@ from enum import Enum
 
 import pandas as pd
 
-from bot.config import SMA_FAST, SMA_SLOW, TIMEFRAME, candle_freq
+from bot.config import ENTRY, SMA_FAST, SMA_SLOW, TIMEFRAME, candle_freq
 
 
 class Signal(str, Enum):
@@ -20,11 +20,14 @@ class Signal(str, Enum):
     HOLD = "hold"
 
 
-def sma_crossover_signal(candles: pd.DataFrame, fast: int = SMA_FAST, slow: int = SMA_SLOW) -> Signal:
-    """BUY when the fast SMA crosses above the slow one on the latest close, SELL on the cross below.
+def sma_crossover_signal(
+    candles: pd.DataFrame, fast: int = SMA_FAST, slow: int = SMA_SLOW, entry: str = ENTRY
+) -> Signal:
+    """SMA crossover on the latest close.
 
-    Fires only on the candle where the cross happens; HOLD otherwise and
-    while there is not enough history.
+    entry="cross": BUY only on the candle where fast crosses above slow, SELL on the cross below.
+    entry="trend": BUY whenever fast > slow, SELL whenever fast < slow (sizing ignores a BUY
+    while already long and a SELL while flat). HOLD while there is not enough history.
     """
     if fast >= slow:
         raise ValueError("fast period must be shorter than slow period")
@@ -35,6 +38,8 @@ def sma_crossover_signal(candles: pd.DataFrame, fast: int = SMA_FAST, slow: int 
     cur_fast, cur_slow = closes[-fast:].mean(), closes[-slow:].mean()
     if math.isnan(prev_fast + prev_slow + cur_fast + cur_slow):
         return Signal.HOLD
+    if entry == "trend":
+        return Signal.BUY if cur_fast > cur_slow else Signal.SELL if cur_fast < cur_slow else Signal.HOLD
     if prev_fast <= prev_slow and cur_fast > cur_slow:
         return Signal.BUY
     if prev_fast >= prev_slow and cur_fast < cur_slow:

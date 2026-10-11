@@ -81,3 +81,19 @@ def test_size_sell_caps_at_limit_and_ignores_dust():
     assert size_trade(Signal.SELL, "sma", usdc=0, wsol=0.01, price=2500, **KW) == pytest.approx(0.002)
     assert size_trade(Signal.SELL, "sma", usdc=0, wsol=0.0002, price=2500, **KW) == 0
     assert size_trade(Signal.HOLD, "sma", usdc=20, wsol=1, price=2500, **KW) == 0
+
+
+def test_trend_entry_follows_the_regime_immediately():
+    up = candles(list(np.linspace(100, 200, 80)))
+    down = candles(list(np.linspace(200, 100, 80)))
+    assert sma_crossover_signal(up, entry="trend") is Signal.BUY
+    assert sma_crossover_signal(up, entry="cross") is Signal.HOLD  # cross happened long ago
+    assert sma_crossover_signal(down, entry="trend") is Signal.SELL
+    assert sma_crossover_signal(candles([100.0] * 80), entry="trend") is Signal.HOLD
+
+
+def test_faster_periods_cross_more_often():
+    wave = list(100 + np.cumsum(np.random.default_rng(7).normal(0, 1, 400)))  # seeded random walk
+    def crosses(fast, slow):
+        return sum(sma_crossover_signal(candles(wave[: i + 1]), fast, slow) is not Signal.HOLD for i in range(60, 400))
+    assert crosses(9, 21) > crosses(20, 50)

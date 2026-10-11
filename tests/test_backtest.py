@@ -75,6 +75,6 @@ def test_report_lists_all_strategies_and_buy_and_hold():
     cfg = load_settings({})
     results = backtest.run_all(c, cfg)
     text = format_report(results, c, cfg)
-    for name in ("Buy & hold", "DCA $1/24h", "SMA 20/50", "SMA 20/50 all-in", "Max DD", "Return", "Trades"):
+    for name in ("Buy & hold", "DCA $1/24h", "SMA 20/50 cross", "SMA 20/50 cross all-in", "Max DD", "Return", "Trades"):
         assert name in text
     assert all(np.isfinite(r.equity).all() for r in results)

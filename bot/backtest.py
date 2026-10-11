@@ -16,6 +16,7 @@ from bot import data
 from bot.config import (
     FEE_RATE,
     MIN_TRADE_USDC,
+    ENTRY,
     SLIPPAGE_RATE,
     SMA_FAST,
     SMA_SLOW,
@@ -124,18 +125,18 @@ def run_all(candles: pd.DataFrame, cfg: Settings = settings, start: float = STAR
             f"DCA ${cfg.dca_amount_usdc:g}/{cfg.dca_interval_hours:g}h", candles, "dca",
             max_trade_usdc=cfg.max_trade_usdc, **common,
         ),
-        simulate(f"SMA {SMA_FAST}/{SMA_SLOW}", candles, "sma", max_trade_usdc=cfg.max_trade_usdc, **common),
-        simulate(f"SMA {SMA_FAST}/{SMA_SLOW} all-in", candles, "sma", max_trade_usdc=math.inf, **common),
+        simulate(f"SMA {SMA_FAST}/{SMA_SLOW} {ENTRY}", candles, "sma", max_trade_usdc=cfg.max_trade_usdc, **common),
+        simulate(f"SMA {SMA_FAST}/{SMA_SLOW} {ENTRY} all-in", candles, "sma", max_trade_usdc=math.inf, **common),
     ]
 
 
 def format_report(results: list[Result], candles: pd.DataFrame, cfg: Settings = settings) -> str:
     start = results[0].start
     rows = [
-        f"{r.name:<18}{r.total_return:>+9.1%}{r.max_drawdown:>10.1%}{r.trades:>8d}{r.exposure:>11.0%}{r.final:>10.2f}"
+        f"{r.name:<26}{r.total_return:>+9.1%}{r.max_drawdown:>10.1%}{r.trades:>8d}{r.exposure:>11.0%}{r.final:>10.2f}"
         for r in results
     ]
-    header = f"{'Strategy':<18}{'Return':>9}{'Max DD':>10}{'Trades':>8}{'Exposure':>11}{'Final $':>10}"
+    header = f"{'Strategy':<26}{'Return':>9}{'Max DD':>10}{'Trades':>8}{'Exposure':>11}{'Final $':>10}"
     return "\n".join(
         [
             f"{SYMBOL} {TIMEFRAME} backtest: {candles.index[0]:%Y-%m-%d %H:%M} -> {candles.index[-1]:%Y-%m-%d %H:%M} UTC "
