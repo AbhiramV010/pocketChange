@@ -30,7 +30,7 @@ log = logging.getLogger("bot")
 
 MAX_SWAP_RETRIES = 1  # hard rule: a failed swap is retried at most once per cycle
 MAX_ATTEMPT_CYCLES = 3  # cycles that may try the same signal before giving up on it
-MAX_DATA_AGE = pd.Timedelta(hours=2)  # older candles mean the feed is stale
+MAX_DATA_AGE = max(data.CANDLE * 2, pd.Timedelta(minutes=15))  # older candles mean the feed is stale
 CANDLES_WANTED = 120
 ALREADY_RUNNING_EXIT = 3  # exit code when another bot holds the instance lock
 

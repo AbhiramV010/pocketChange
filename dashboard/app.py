@@ -140,25 +140,26 @@ def live_view() -> None:
             "Resume with the pause toggle.",
             width="stretch",
         )
-    top = st.columns([2, 2, 3])
-    with top[0]:
-        if dry_run:
-            st.warning("**DRY RUN**: simulated balances and trades, nothing on-chain", icon=":material/science:")
-        else:
-            st.error("**LIVE**: real funds on Solana", icon=":material/bolt:")
-    with top[1]:
-        age = seconds_since(heartbeat)
-        if age is None:
-            st.info("Bot has not reported yet")
-        elif age > max(180, settings.loop_interval_seconds * 3):
-            st.error(f"Bot silent for {age / 60:.0f} min." + ("" if PUBLIC else " Is `python -m bot.run` running?"))
-        else:
-            st.success(f"Bot alive, last cycle {age:.0f}s ago")
+    # Status line between two rules: mode, bot heartbeat, pause control.
+    st.divider()
+    top = st.columns([2, 2, 3], vertical_alignment="center")
+    if dry_run:
+        top[0].markdown(":orange[**DRY RUN**] · simulated, nothing on-chain")
+    else:
+        top[0].markdown(":red[**LIVE**] · real funds on Solana")
+    age = seconds_since(heartbeat)
+    if age is None:
+        top[1].markdown(":gray[Bot has not reported yet]")
+    elif age > max(180, settings.loop_interval_seconds * 3):
+        top[1].markdown(f":red[**Bot silent** for {age / 60:.0f} min]" + ("" if PUBLIC else " · is `bot.run` running?"))
+    else:
+        top[1].markdown(f":green[**Bot alive**] · last cycle {age:.0f}s ago")
     with top[2]:
         if PUBLIC:
-            st.info("Trading paused" if paused else "Trading active", icon=":material/visibility:")
+            st.markdown(":orange[**Trading paused**]" if paused else ":green[**Trading active**]")
         else:
             render_pause_toggle(paused, halted)
+    st.divider()
 
     trades = trades_all[trades_all["simulated"] == dry_run]
     balances = balances_all[balances_all["simulated"] == dry_run]

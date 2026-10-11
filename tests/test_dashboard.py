@@ -158,7 +158,7 @@ def test_public_mode_has_no_controls_and_writes_nothing(public_app):
     before = snapshot()
     at = run_app()
     assert len(at.toggle) == 0 and len(at.button) == 0
-    assert any("Trading active" in i.value for i in at.info)
+    assert any("Trading active" in m.value for m in at.markdown)
     shown = at.dataframe[0].value
     assert "tx" not in shown.columns and "tx_hash" not in shown.columns
     assert "5SecretWalletRevealingSig" not in shown.to_string()

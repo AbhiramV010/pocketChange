@@ -38,3 +38,16 @@ def test_blank_values_use_defaults():
 def test_invalid_values_raise(env):
     with pytest.raises(ConfigError):
         load_settings(env)
+
+
+@pytest.mark.parametrize("tf, freq, minutes", [("5m", "5min", 5), ("15m", "15min", 15), ("1h", "1h", 60), ("4h", "4h", 240)])
+def test_timeframe_maps_to_pandas_minutes_not_months(tf, freq, minutes):
+    import subprocess, sys
+
+    code = (
+        "import sys; sys.path.insert(0, '.'); from bot import config, data; "
+        "print(config.CANDLE_FREQ, int(data.CANDLE.total_seconds() // 60))"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         env={**__import__("os").environ, "TIMEFRAME": tf}).stdout.split()
+    assert out == [freq, str(minutes)]

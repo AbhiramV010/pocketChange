@@ -16,7 +16,8 @@ load_dotenv(ROOT / ".env", override=False)
 
 # Market and strategy constants (not env-tunable).
 SYMBOL = "SOL/USDC"
-TIMEFRAME = "1h"
+TIMEFRAMES = ("1m", "5m", "15m", "30m", "1h", "4h")
+TIMEFRAME = (os.environ.get("TIMEFRAME") or "1h").strip().lower()  # candle size for strategies and backtests
 SMA_FAST = 20
 SMA_SLOW = 50
 MIN_TRADE_USDC = 1.0  # below this a trade is not worth the fees
@@ -30,6 +31,12 @@ STRATEGIES = ("sma", "dca")
 
 class ConfigError(ValueError):
     """Raised for an invalid setting. Messages name the variable, never secrets."""
+
+
+if TIMEFRAME not in TIMEFRAMES:
+    raise ConfigError(f"TIMEFRAME must be one of {TIMEFRAMES}, got {TIMEFRAME!r}")
+# pandas spelling of TIMEFRAME: to pandas "5m" means five *months*.
+CANDLE_FREQ = TIMEFRAME.replace("m", "min") if TIMEFRAME.endswith("m") else TIMEFRAME
 
 
 def _raw(env: Mapping[str, str], name: str) -> str | None:
@@ -89,7 +96,7 @@ class Settings:
     candle_exchange: str = "binance"
     dashboard_public: bool = False  # read-only public view: no pause control, no transaction links
     db_path: Path = DATA_DIR / "pocketchange.db"
-    candles_path: Path = DATA_DIR / "candles.csv"
+    candles_path: Path = DATA_DIR / ("candles.csv" if TIMEFRAME == "1h" else f"candles_{TIMEFRAME}.csv")
     log_path: Path = DATA_DIR / "bot.log"
 
     def __post_init__(self) -> None:

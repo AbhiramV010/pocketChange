@@ -1,5 +1,8 @@
+import os
 import sys
 from pathlib import Path
+
+os.environ["TIMEFRAME"] = "1h"  # tests assume hourly candles, whatever .env says
 
 import pytest
 

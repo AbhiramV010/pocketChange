@@ -14,12 +14,12 @@ from pathlib import Path
 import ccxt
 import pandas as pd
 
-from bot.config import SYMBOL, TIMEFRAME, settings
+from bot.config import CANDLE_FREQ, SYMBOL, TIMEFRAME, settings
 
 log = logging.getLogger(__name__)
 
 COLUMNS = ["open", "high", "low", "close", "volume"]
-CANDLE = pd.Timedelta(TIMEFRAME)
+CANDLE = pd.Timedelta(CANDLE_FREQ)
 PAGE_LIMIT = 1000
 MAX_PAGES = 200
 # Tried in order after the configured exchange. All list SOL/USDC.

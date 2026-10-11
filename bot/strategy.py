@@ -11,7 +11,7 @@ from enum import Enum
 
 import pandas as pd
 
-from bot.config import SMA_FAST, SMA_SLOW, TIMEFRAME
+from bot.config import CANDLE_FREQ, SMA_FAST, SMA_SLOW
 
 
 class Signal(str, Enum):
@@ -48,8 +48,8 @@ def dca_signal(candles: pd.DataFrame, last_buy_time: pd.Timestamp | None, interv
         return Signal.HOLD
     if last_buy_time is None:
         return Signal.BUY
-    now = candles.index[-1] + pd.Timedelta(TIMEFRAME)  # close time of the latest closed candle
-    last = pd.Timestamp(last_buy_time).floor(TIMEFRAME)  # buys land mid-candle; compare on the candle grid
+    now = candles.index[-1] + pd.Timedelta(CANDLE_FREQ)  # close time of the latest closed candle
+    last = pd.Timestamp(last_buy_time).floor(CANDLE_FREQ)  # buys land mid-candle; compare on the candle grid
     return Signal.BUY if now - last >= pd.Timedelta(hours=interval_hours) else Signal.HOLD
 
 
