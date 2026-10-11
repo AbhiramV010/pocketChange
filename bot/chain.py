@@ -1,17 +1,3 @@
-"""On-chain access for Solana: balances, quotes and swaps via the Jupiter aggregator.
-
-This is the only module that reads PRIVATE_KEY, and only from the
-environment. The key is never logged, printed or placed in an exception
-message.
-
-Why Jupiter: SOL/USDC liquidity on Solana is split across many AMMs and
-order books, and Jupiter routes across them with a keyless public API. Its
-transactions are never signed blind: every swap is simulated first, and the
-simulated balance changes must match the quote and the limits.
-
-The position is held as wrapped SOL (wSOL). Native SOL only pays fees and
-rent, and the bot never trades it.
-"""
 from __future__ import annotations
 
 import argparse
@@ -53,19 +39,19 @@ BUY, SELL = "buy", "sell"
 
 
 class ChainError(Exception):
-    """RPC or API problem. Messages are scrubbed of RPC URLs and keys."""
+    pass
 
 
 class SwapFailed(ChainError):
-    """The swap definitely did not execute (refused, rejected, failed on-chain or expired). Safe to retry once."""
+    pass
 
 
 class SwapUncertain(ChainError):
-    """A transaction was sent but its outcome could not be determined. Never retry."""
+    pass
 
 
 class RpcError(ChainError):
-    """The RPC node answered with a JSON-RPC error."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -79,7 +65,6 @@ class Quote:
 
     @property
     def price(self) -> float:
-        """USDC per SOL implied by the quote."""
         usdc_raw, sol_raw = (
             (self.amount_in_raw, self.amount_out_raw) if self.side == BUY else (self.amount_out_raw, self.amount_in_raw)
         )
@@ -88,17 +73,13 @@ class Quote:
 
 @dataclass(frozen=True)
 class Snapshot:
-    """Raw wallet balances: lamports of native SOL and base units of each token account."""
 
     lamports: int
     usdc: int
     wsol: int
 
 
-# --- pure helpers ------------------------------------------------------------
-
 def to_raw(amount: float | Decimal | str, decimals: int) -> int:
-    """Token units -> integer base units, rounded down."""
     return int((Decimal(str(amount)) * 10**decimals).to_integral_value(rounding=ROUND_DOWN))
 
 
@@ -111,12 +92,10 @@ def min_amount_out(amount_out_raw: int, slippage_bps: int) -> int:
 
 
 def ata(owner: Pubkey, mint: Pubkey) -> Pubkey:
-    """Associated token account of `owner` for `mint`."""
     return Pubkey.find_program_address([bytes(owner), bytes(TOKEN_PROGRAM), bytes(mint)], ATA_PROGRAM)[0]
 
 
 def token_amount(account: dict | None) -> int:
-    """Amount held by an SPL token account from a base64 RPC account (0 if it does not exist)."""
     if not account:
         return 0
     data = base64.b64decode(account["data"][0])
@@ -124,7 +103,6 @@ def token_amount(account: dict | None) -> int:
 
 
 def _mints(side: str) -> tuple[Pubkey, Pubkey, int, int]:
-    """(mint_in, mint_out, decimals_in, decimals_out)."""
     if side == BUY:
         return USDC_MINT, WSOL_MINT, USDC_DECIMALS, SOL_DECIMALS
     if side == SELL:
@@ -145,7 +123,6 @@ def _load_keypair() -> Keypair:
 
 
 def _guard(fn):
-    """Turn any unexpected failure into a ChainError with a scrubbed message."""
 
     @functools.wraps(fn)
     def wrapper(self, *args, **kwargs):
@@ -160,7 +137,6 @@ def _guard(fn):
 
 
 class ChainClient:
-    """Balances, quotes and swaps for one wallet. Pass `address` for a read-only client (no key needed)."""
 
     def __init__(self, cfg: Settings = settings, *, address: str | None = None, http: requests.Session | None = None):
         self._cfg = cfg
@@ -175,8 +151,6 @@ class ChainClient:
 
     def __repr__(self) -> str:
         return f"ChainClient(address={self.address})"
-
-    # --- plumbing ----------------------------------------------------------
 
     def _scrub(self, text: str) -> str:
         secrets = []
@@ -233,8 +207,6 @@ class ChainClient:
         owner, usdc, wsol = accounts
         return Snapshot((owner or {}).get("lamports", 0), token_amount(usdc), token_amount(wsol))
 
-    # --- reads -------------------------------------------------------------
-
     @_guard
     def balances(self) -> Balances:
         self._ensure_verified()
@@ -267,16 +239,8 @@ class ChainClient:
         route = " > ".join(step.get("swapInfo", {}).get("label", "?") for step in q.get("routePlan", []))
         return Quote(side, amount_in_raw, out, min_out, route, q)
 
-    # --- swap --------------------------------------------------------------
-
     @_guard
     def swap(self, side: str, amount_in: float, ref_price: float) -> Fill:
-        """Swap `amount_in` (USDC for buy, wSOL for sell) and wait for confirmation.
-
-        `ref_price` is an independent USDC-per-SOL price used to reject bad
-        quotes. Raises SwapFailed if nothing was executed, SwapUncertain if a
-        transaction may have landed.
-        """
         cfg = self._cfg
         if self._keypair is None:
             raise ChainError("read-only client cannot swap")
@@ -348,7 +312,6 @@ class ChainClient:
         return Fill(amount_in_f, amount_out_f, price, signature)
 
     def _check_message(self, tx: VersionedTransaction) -> None:
-        """Our wallet must be the fee payer and the only signer."""
         msg = tx.message
         if msg.account_keys[0] != self.owner:
             raise SwapFailed("Jupiter transaction has an unexpected fee payer")
@@ -361,7 +324,6 @@ class ChainClient:
     def _check_simulation(
         self, tx: VersionedTransaction, side: str, quote: Quote, before: Snapshot, ref_price: float
     ) -> None:
-        """Simulate on the current chain state and check what the transaction would actually do."""
         result = self._rpc(
             "simulateTransaction",
             [
@@ -394,7 +356,6 @@ class ChainClient:
             raise SwapFailed(f"swap would cost ${cost_usd:.3f} in SOL fees/rent, above MAX_FEE_USD={self._cfg.max_fee_usd}")
 
     def _send_and_confirm(self, tx: VersionedTransaction, signature: str, last_valid_height: int) -> None:
-        """Broadcast and wait until the swap landed, failed, or provably can never land."""
         try:
             self._rpc(
                 "sendTransaction",
@@ -429,7 +390,6 @@ class ChainClient:
         raise SwapUncertain(f"transaction {signature} outcome unknown after {CONFIRM_TIMEOUT_S}s")
 
     def _settled_snapshot(self, before: Snapshot) -> Snapshot:
-        """Balances after the swap. A lagging RPC may briefly show old balances, so retry a few times."""
         for _ in range(5):
             try:
                 snap = self._snapshot()
@@ -441,7 +401,7 @@ class ChainClient:
         return before
 
 
-# --- command line: read-only check and a manual swap for the first live test ---
+# Command line: a read-only check and a manual swap for the first live test.
 
 def _reference_price() -> float:
     from bot import data
@@ -461,7 +421,6 @@ def _cli_check(client: ChainClient) -> None:
 
 
 def new_wallet(env_path: Path, force: bool = False) -> str:
-    """Generate a fresh keypair and store it as PRIVATE_KEY in `env_path`. Returns the public address only."""
     lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
     current = next((ln.split("=", 1)[1].strip() for ln in lines if ln.startswith("PRIVATE_KEY=")), "")
     if current and not force:

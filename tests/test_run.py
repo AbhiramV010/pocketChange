@@ -21,7 +21,6 @@ def candle_frame(closes, start=START):
 
 
 def buy_signal_series():
-    """Closes where the last *closed* candle is an SMA cross-up, plus one forming candle."""
     closes = list(np.linspace(200, 100, 60)) + list(np.linspace(100, 300, 60))
     for i in range(60, len(closes)):
         if sma_crossover_signal(candle_frame(closes[: i + 1])) is Signal.BUY:
@@ -38,7 +37,6 @@ def sell_signal_series():
 
 
 class Rig:
-    """A Context wired to an in-memory-ish DB, a scripted feed and a fixed clock."""
 
     def __init__(self, conn, closes, cfg=CFG, broker=None):
         self.frame = candle_frame(closes)
@@ -60,8 +58,6 @@ class Rig:
 def trades(conn):
     return db.read_trades(conn)
 
-
-# --- trading -----------------------------------------------------------------
 
 def test_sma_buy_in_dry_run_is_simulated_and_not_repeated(conn):
     rig = Rig(conn, buy_signal_series())
@@ -111,8 +107,6 @@ def test_trade_sizes_never_exceed_cap(conn):
     Rig(conn, buy_signal_series(), cfg=cfg).cycle()
     assert trades(conn)["amount_in"].max() <= 3.0
 
-
-# --- pause and halt -------------------------------------------------------------
 
 def test_pause_blocks_trading_but_keeps_logging_balances(conn):
     rig = Rig(conn, buy_signal_series())
@@ -180,8 +174,6 @@ def test_native_sol_is_not_counted_in_equity(conn):
     Rig(conn, [100.0] * 72, cfg=cfg).cycle()
     assert db.is_halted(conn)
 
-
-# --- failures --------------------------------------------------------------------
 
 class FailingBroker:
     def __init__(self, inner, error):
@@ -260,8 +252,6 @@ def test_low_native_sol_blocks_trade(conn):
     Rig(conn, buy_signal_series(), cfg=cfg).cycle()
     assert len(trades(conn)) == 0
 
-
-# --- simulator -----------------------------------------------------------------------
 
 def test_sim_broker_charges_costs_and_enforces_limits(conn):
     sim = SimBroker(conn, CFG)

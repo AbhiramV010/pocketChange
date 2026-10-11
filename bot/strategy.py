@@ -1,9 +1,3 @@
-"""Strategies as pure functions: candles in, signal out.
-
-Every function takes *closed* candles only (last row = most recent closed
-candle) and has no side effects, so the backtest and the live loop run the
-exact same code.
-"""
 from __future__ import annotations
 
 import math
@@ -23,12 +17,6 @@ class Signal(str, Enum):
 def sma_crossover_signal(
     candles: pd.DataFrame, fast: int = SMA_FAST, slow: int = SMA_SLOW, entry: str = ENTRY
 ) -> Signal:
-    """SMA crossover on the latest close.
-
-    entry="cross": BUY only on the candle where fast crosses above slow, SELL on the cross below.
-    entry="trend": BUY whenever fast > slow, SELL whenever fast < slow (sizing ignores a BUY
-    while already long and a SELL while flat). HOLD while there is not enough history.
-    """
     if fast >= slow:
         raise ValueError("fast period must be shorter than slow period")
     closes = candles["close"].to_numpy(dtype=float)[-(slow + 1) :]
@@ -50,7 +38,6 @@ def sma_crossover_signal(
 def dca_signal(
     candles: pd.DataFrame, last_buy_time: pd.Timestamp | None, interval_hours: float, timeframe: str = TIMEFRAME
 ) -> Signal:
-    """BUY when `interval_hours` have passed since the last buy (or there was none). Never sells."""
     if candles.empty:
         return Signal.HOLD
     if last_buy_time is None:
@@ -72,11 +59,6 @@ def size_trade(
     dca_amount_usdc: float,
     min_trade_usdc: float,
 ) -> float:
-    """Amount of the input token to trade: USDC for BUY, wSOL for SELL. 0.0 means do nothing.
-
-    Shared by the backtest and the bot so both size trades identically.
-    Never exceeds `max_trade_usdc` in USD terms.
-    """
     position_usd = wsol * price
     if signal is Signal.BUY:
         if strategy == "sma" and position_usd >= min_trade_usdc:

@@ -1,8 +1,3 @@
-"""Candle download (ccxt public endpoints, no key) and CSV cache.
-
-Candle frames are indexed by UTC candle *open* time with columns
-open, high, low, close, volume.
-"""
 from __future__ import annotations
 
 import argparse
@@ -33,7 +28,7 @@ _exchanges: dict[str, ccxt.Exchange] = {}
 
 
 class DataError(RuntimeError):
-    """No exchange could provide candles."""
+    pass
 
 
 def _exchange(exchange_id: str) -> ccxt.Exchange:
@@ -48,7 +43,6 @@ def _exchange_order(preferred: str | None) -> list[str]:
 
 
 def to_frame(rows: list[list[float]]) -> pd.DataFrame:
-    """ccxt OHLCV rows -> candle frame (sorted, de-duplicated, no NaNs)."""
     df = pd.DataFrame(rows, columns=["ts", *COLUMNS])
     df.index = pd.DatetimeIndex(pd.to_datetime(df.pop("ts"), unit="ms", utc=True), name="timestamp")
     df = df.astype(float).dropna()
@@ -58,7 +52,6 @@ def to_frame(rows: list[list[float]]) -> pd.DataFrame:
 def download(
     since: datetime, exchange_id: str, until: datetime | None = None, timeframe: str = TIMEFRAME
 ) -> pd.DataFrame:
-    """Page through one exchange's history from `since`."""
     ex = _exchange(exchange_id)
     until_ms = int((until or datetime.now(timezone.utc)).timestamp() * 1000)
     cursor = int(since.timestamp() * 1000)
@@ -92,13 +85,11 @@ def _download_with_fallback(since: datetime, preferred: str | None, timeframe: s
 
 
 def fetch_recent(limit: int = 120, exchange_id: str | None = None, timeframe: str = TIMEFRAME) -> pd.DataFrame:
-    """Latest `limit` candles including the still-forming one."""
     since = datetime.now(timezone.utc) - candle_delta(timeframe) * (limit + 1)
     return _download_with_fallback(since, exchange_id, timeframe).tail(limit)
 
 
 def closed_only(df: pd.DataFrame, now: datetime | None = None, timeframe: str = TIMEFRAME) -> pd.DataFrame:
-    """Drop the candle that is still forming."""
     now_ts = pd.Timestamp(now or datetime.now(timezone.utc))
     return df[df.index + candle_delta(timeframe) <= now_ts]
 
@@ -121,7 +112,6 @@ def save_cache(df: pd.DataFrame, path: Path | None = None) -> None:
 
 
 def gap_count(df: pd.DataFrame) -> int:
-    """Number of missing candles inside the cached range."""
     if len(df) < 2:
         return 0
     expected = int((df.index[-1] - df.index[0]) / CANDLE) + 1
@@ -129,7 +119,6 @@ def gap_count(df: pd.DataFrame) -> int:
 
 
 def update_cache(days: int = 365, path: Path | None = None, exchange_id: str | None = None) -> pd.DataFrame:
-    """Download new closed candles into the cache (full pull if empty)."""
     cached = load_cache(path)
     if cached.empty:
         since = datetime.now(timezone.utc) - timedelta(days=days)

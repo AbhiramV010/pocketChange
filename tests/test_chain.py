@@ -32,14 +32,12 @@ def token_account(amount: int | None):
 
 
 def unsigned_tx(payer) -> str:
-    """A real, unsigned v0 transaction with `payer` as fee payer, like Jupiter returns."""
     ix = transfer(TransferParams(from_pubkey=payer, to_pubkey=Keypair().pubkey(), lamports=1))
     msg = MessageV0.try_compile(payer, [ix], [], Hash.default())
     return base64.b64encode(bytes(VersionedTransaction.populate(msg, [Signature.default()]))).decode()
 
 
 class FakeNet:
-    """A scripted Solana RPC node and Jupiter API."""
 
     def __init__(self, client, lamports=10**8, usdc=20_000_000, wsol=0):
         self.client = client
@@ -130,8 +128,6 @@ def fair_buy(net, usdc_in=1_000_000, fee=10_000):
     return out
 
 
-# --- pure helpers ---------------------------------------------------------
-
 def test_to_raw_rounds_down_and_handles_floats():
     assert chain.to_raw(1.0, 6) == 1_000_000
     assert chain.to_raw(0.1 + 0.2, 6) == 300_000
@@ -163,8 +159,6 @@ def test_mints_rejects_unknown_side():
     with pytest.raises(ValueError):
         chain._mints("hodl")
 
-
-# --- private key handling --------------------------------------------------
 
 def test_missing_or_bad_key_never_leaks(monkeypatch):
     monkeypatch.delenv("PRIVATE_KEY", raising=False)
@@ -216,8 +210,6 @@ def test_new_wallet_writes_key_once_and_returns_only_address(tmp_path, monkeypat
         chain.new_wallet(env)
 
 
-# --- network checks and reads ---------------------------------------------------
-
 def test_wrong_cluster_is_rejected(client):
     net = wire(client)
     client._rpc = lambda m, p=None: "devnet-genesis" if m == "getGenesisHash" else net.rpc(m, p)
@@ -239,8 +231,6 @@ def test_quote_validates_response(client):
     with pytest.raises(ChainError, match="does not match"):
         client.quote(BUY, 1_000_000)
 
-
-# --- swap safety checks ----------------------------------------------------
 
 def test_swap_refused_in_dry_run(monkeypatch):
     monkeypatch.setenv("PRIVATE_KEY", str(KEY))
@@ -299,7 +289,7 @@ def test_sell_is_clamped_under_cap(client):
     assert int(net.swap_body["quoteResponse"]["outAmount"]) <= chain.to_raw(CFG.max_trade_usdc, 6)
 
 
-# --- simulation checks: nothing is sent when the simulated effect is wrong ----------------
+# Nothing is sent when the simulated effect is wrong.
 
 @pytest.mark.parametrize(
     "tamper, message",
@@ -342,8 +332,6 @@ def test_unexpected_fee_payer_is_refused(client):
         client.swap(BUY, 1.0, PRICE)
     assert "simulateTransaction" not in net.calls
 
-
-# --- broadcast and confirmation -----------------------------------------------------
 
 def test_preflight_rejection_is_retry_safe(client):
     net = wire(client)

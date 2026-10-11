@@ -1,23 +1,3 @@
-"""Start pocketchange: the trading bot plus its dashboard, with everything they need.
-
-    python launch.py                 dry run (default) or live, per .env
-    python launch.py --no-browser    do not open the dashboard in a browser
-    python launch.py --port 8600     dashboard port (default: first free from 8501)
-    python launch.py --check         run the pre-flight checks only, start nothing
-
-Works with any Python 3.11+: it creates or updates .venv, installs
-requirements when they change, re-runs itself inside the venv, then:
-
-  1. creates .env from .env.example if missing, and validates the settings
-  2. in live mode, shows a warning and asks for confirmation, then checks the wallet
-  3. checks that the price feed is reachable (warns only: the bot retries on its own)
-  4. initialises the database
-  5. starts the bot and the dashboard (dashboard on 127.0.0.1 only: it has the pause switch)
-  6. opens the dashboard once it answers, and restarts either process if it crashes
-  7. stops both cleanly on Ctrl+C
-
-Logs: data/bot.log (bot) and data/dashboard.log (dashboard), plus this console.
-"""
 from __future__ import annotations
 
 import argparse
@@ -65,7 +45,7 @@ def fail(message: str) -> NoReturn:
     sys.exit(1)
 
 
-# --- 0. environment bootstrap (runs under any Python) ---------------------------
+# Step 0 runs under any Python, before the venv exists.
 
 def in_project_venv() -> bool:
     return Path(sys.prefix).resolve() == VENV.resolve()
@@ -76,7 +56,6 @@ def requirements_hash() -> str:
 
 
 def ensure_venv() -> None:
-    """Create .venv if needed and (re)install requirements when they changed."""
     if not VENV_PY.exists():
         say("creating virtual environment in .venv ...")
         venv.EnvBuilder(with_pip=True, clear=VENV.exists()).create(VENV)
@@ -93,7 +72,6 @@ def ensure_venv() -> None:
 
 
 def reexec_in_venv(argv: list[str]) -> None:
-    """Run this script again with the venv's Python and exit with its code."""
     proc = subprocess.Popen([str(VENV_PY), str(Path(__file__).resolve()), *argv], cwd=ROOT)
     while True:
         try:
@@ -102,7 +80,7 @@ def reexec_in_venv(argv: list[str]) -> None:
             continue  # the child got the same Ctrl+C and is shutting down; wait for it
 
 
-# --- 1-4. pre-flight (runs inside the venv) --------------------------------------------
+# Steps 1-4 (pre-flight) run inside the venv.
 
 def ensure_env_file() -> None:
     env, example = ROOT / ".env", ROOT / ".env.example"
@@ -124,7 +102,6 @@ def load_settings() -> "Settings":
 
 
 def confirm_live(cfg, assume_yes: bool) -> None:
-    """Live mode moves real money: make the operator say so, and check the wallet first."""
     from bot import chain
 
     print()
@@ -183,10 +160,7 @@ def free_port(start: int) -> int:
     fail(f"no free port found from {start}")
 
 
-# --- 5-7. processes ---------------------------------------------------------------------
-
 class Service:
-    """A supervised child process whose output is prefixed on the console and copied to a log."""
 
     def __init__(self, name: str, cmd: list[str], log_file: Path | None = None, stop_grace: float = UI_STOP_GRACE_S):
         self.name, self.cmd, self.log_file, self.stop_grace = name, cmd, log_file, stop_grace
@@ -239,7 +213,6 @@ class Service:
             pass
 
     def wait_stopped(self) -> None:
-        """Wait for a graceful exit, then force it."""
         if self.proc is None:
             return
         try:
@@ -267,7 +240,6 @@ def wait_for_dashboard(port: int, service: Service) -> bool:
 
 
 def supervise(services: list[Service]) -> int:
-    """Restart crashed services with backoff; return an exit code when it is time to stop."""
     while True:
         time.sleep(1)
         for svc in services:

@@ -1,4 +1,3 @@
-"""Settings and hard limits. Loads .env; every tunable limit lives here."""
 from __future__ import annotations
 
 import os
@@ -34,7 +33,7 @@ STRATEGIES = ("sma", "dca")
 
 
 class ConfigError(ValueError):
-    """Raised for an invalid setting. Messages name the variable, never secrets."""
+    pass
 
 
 if not 2 <= SMA_FAST < SMA_SLOW <= 500:
@@ -47,7 +46,6 @@ DASHBOARD_TIMEFRAMES = ("1m", "5m", "15m", "30m", "1h")  # choices on the dashbo
 
 
 def candle_freq(timeframe: str) -> str:
-    """pandas spelling of an exchange timeframe: to pandas "5m" means five *months*."""
     return timeframe.replace("m", "min") if timeframe.endswith("m") else timeframe
 
 
@@ -135,7 +133,6 @@ class Settings:
 
 
 def load_settings(env: Mapping[str, str] | None = None) -> Settings:
-    """Build Settings from the environment. DRY_RUN defaults to true."""
     env = os.environ if env is None else env
     defaults = Settings()
     strategy = (_raw(env, "STRATEGY") or defaults.strategy).lower()

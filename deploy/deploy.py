@@ -1,18 +1,3 @@
-"""Deploy pocketchange to a Google Cloud e2-micro VM. Run from the repo root on Windows:
-
-    python deploy/deploy.py up        create the VM if needed, upload, install, start everything
-    python deploy/deploy.py push      upload the current code and .env, restart services
-    python deploy/deploy.py url       print the public (read-only) dashboard URL
-    python deploy/deploy.py status    service status on the VM
-    python deploy/deploy.py logs      last bot log lines
-    python deploy/deploy.py private   open the private dashboard (with pause) at http://localhost:8501 via SSH
-
-Services on the VM (systemd, restart on failure and at boot):
-    pocketchange-bot       python -m bot.run
-    pocketchange-private   Streamlit on 127.0.0.1:8501, full dashboard, reachable only through SSH
-    pocketchange-public    Streamlit on 127.0.0.1:8502 with DASHBOARD_PUBLIC=true (read-only)
-    pocketchange-tunnel    Cloudflare quick tunnel -> public dashboard, prints a https://*.trycloudflare.com URL
-"""
 from __future__ import annotations
 
 import argparse

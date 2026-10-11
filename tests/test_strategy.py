@@ -18,7 +18,6 @@ def test_sma_needs_history():
 def test_sma_buy_on_cross_up_only_once():
     down = list(np.linspace(200, 100, 60))   # fast below slow
     up = list(np.linspace(100, 300, 40))
-    # find the first candle where the cross happens
     signals = [sma_crossover_signal(candles(down + up[: i + 1])) for i in range(len(up))]
     assert signals.count(Signal.BUY) == 1
     assert Signal.SELL not in signals

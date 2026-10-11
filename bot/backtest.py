@@ -1,9 +1,3 @@
-"""Backtest DCA and SMA crossover on the cached candles and print a comparison.
-
-Uses the same strategy and sizing functions as the live bot. Signals are
-computed on a candle's close and filled at the *next* candle's open, with a
-fee and slippage charged on every trade.
-"""
 from __future__ import annotations
 
 import argparse

@@ -1,8 +1,3 @@
-"""The trading loop. Run it as its own process: python -m bot.run
-
-Each cycle: top-of-cycle flags, balances, price, equity floor, signal, trade.
-Errors are logged and the loop sleeps and carries on; it only stops on Ctrl+C.
-"""
 from __future__ import annotations
 
 import argparse
@@ -31,7 +26,6 @@ log = logging.getLogger("bot")
 MAX_SWAP_RETRIES = 1  # hard rule: a failed swap is retried at most once per cycle
 MAX_ATTEMPT_CYCLES = 3  # cycles that may try the same signal before giving up on it
 def max_data_age(timeframe: str) -> pd.Timedelta:
-    """Older candles than this mean the feed is stale."""
     return max(data.candle_delta(timeframe) * 2, pd.Timedelta(minutes=15))
 CANDLES_WANTED = 120
 ALREADY_RUNNING_EXIT = 3  # exit code when another bot holds the instance lock
@@ -40,7 +34,6 @@ _stop = threading.Event()
 
 
 def request_stop(signum=None, frame=None) -> None:
-    """Signal handler: finish the current cycle, then exit. A second signal stops immediately."""
     if _stop.is_set():
         raise KeyboardInterrupt
     _stop.set()
@@ -54,11 +47,6 @@ def install_stop_handlers() -> None:
 
 
 def acquire_instance_lock(path: Path) -> IO | None:
-    """Exclusive lock for the life of the process, so two bots never trade one wallet.
-
-    Returns the open lock file (keep a reference to it) or None if another
-    process holds it. The OS releases the lock if the process dies.
-    """
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(path, "a+")
     try:
@@ -83,7 +71,6 @@ class Broker(Protocol):
 
 
 class SimBroker:
-    """Dry run: a simulated wallet replayed from simulated trades. Sends nothing on-chain."""
 
     def __init__(self, conn: sqlite3.Connection, cfg: Settings):
         self._conn, self._cfg = conn, cfg
@@ -122,8 +109,6 @@ class Context:
     clock: Callable[[], datetime] = field(default=_utc_now)
 
 
-# --- one cycle ---------------------------------------------------------------
-
 def run_cycle(ctx: Context) -> None:
     cfg, conn = ctx.cfg, ctx.conn
     now = ctx.clock()
@@ -153,7 +138,6 @@ def run_cycle(ctx: Context) -> None:
 
 
 def _market(ctx: Context, now: datetime, timeframe: str) -> tuple[pd.DataFrame, float | None]:
-    """Latest candles and the current price, or (empty, None) if the feed is down or stale."""
     try:
         candles = ctx.feed(timeframe)
     except Exception as exc:  # network, rate limit, exchange outage
@@ -166,12 +150,10 @@ def _market(ctx: Context, now: datetime, timeframe: str) -> tuple[pd.DataFrame, 
 
 
 def equity_usd(balances: Balances, price: float) -> float:
-    """USDC + wSOL at `price`. Native SOL (the fee reserve) is never counted."""
     return balances.usdc + balances.wsol * price
 
 
 def _enforce_equity_floor(ctx: Context, balances: Balances, price: float) -> bool:
-    """Set the persistent halt flag if equity is under the floor. Returns True if halted."""
     equity = equity_usd(balances, price)
     if equity >= ctx.cfg.min_equity_usd:
         return False
@@ -245,7 +227,6 @@ def _trade_if_signal(
 
 
 def _swap_with_one_retry(ctx: Context, side: str, amount: float, price: float) -> Fill | None:
-    """At most one retry, and only when the swap definitely did not execute."""
     for attempt in range(1 + MAX_SWAP_RETRIES):
         try:
             return ctx.broker.swap(side, amount, price)
@@ -262,8 +243,6 @@ def _swap_with_one_retry(ctx: Context, side: str, amount: float, price: float) -
             return None
     return None
 
-
-# --- process entry -------------------------------------------------------------
 
 def configure_logging(cfg: Settings) -> None:
     cfg.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -284,7 +263,6 @@ def configure_logging(cfg: Settings) -> None:
 
 
 def run_loop(ctx: Context, once: bool = False) -> None:
-    """Run cycles until a stop is requested. A stop never interrupts a cycle, so never a swap."""
     while not _stop.is_set():
         started = time.monotonic()
         try:

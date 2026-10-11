@@ -1,12 +1,3 @@
-"""Streamlit dashboard. Run: streamlit run dashboard/app.py
-
-Read-only view of the bot's SQLite database. The one thing it writes is the
-pause flag. It cannot clear a halt and never touches the wallet key.
-
-With DASHBOARD_PUBLIC=true it is safe to share: there is no pause control,
-nothing is ever written, and transaction links (which reveal the wallet) are
-hidden.
-"""
 import html
 import sys
 from contextlib import closing
@@ -42,7 +33,6 @@ st.markdown(  # the STOP button is always red, whatever the theme
 
 
 def set_paused(paused: bool) -> None:
-    """STOP / RESUME button: the dashboard's only write. Never runs in public mode."""
     if PUBLIC:
         return
     with closing(db.connect(settings.db_path)) as conn:
@@ -51,7 +41,6 @@ def set_paused(paused: bool) -> None:
 
 
 def set_timeframe() -> None:
-    """Timeframe switch: the bot picks it up on its next cycle. Never runs in public mode."""
     choice = st.session_state.get("timeframe")
     if PUBLIC or choice not in DASHBOARD_TIMEFRAMES:
         return
@@ -61,7 +50,6 @@ def set_timeframe() -> None:
 
 
 def position_summary(trades: pd.DataFrame) -> tuple[float, float, float]:
-    """(wSOL held, average entry price, realised P&L in USDC) by moving-average cost."""
     qty = cost = realised = 0.0
     for side, amount_in, amount_out in zip(trades["side"], trades["amount_in"], trades["amount_out"]):
         if side == "buy":

@@ -1,7 +1,3 @@
-"""Clear the persistent halt flag: python -m bot.reset_halt
-
-This is the only way to clear a halt. The dashboard cannot do it.
-"""
 from __future__ import annotations
 
 import argparse

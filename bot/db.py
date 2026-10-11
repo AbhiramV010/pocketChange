@@ -1,8 +1,3 @@
-"""SQLite schema and helpers, shared by the bot and the dashboard.
-
-The bot writes everything. The dashboard reads, and writes exactly one thing:
-the pause flag (`set_paused`).
-"""
 from __future__ import annotations
 
 import sqlite3
@@ -41,7 +36,6 @@ CREATE TABLE IF NOT EXISTS state (
 );
 """
 
-# state keys
 PAUSED = "paused"
 HALTED = "halted"
 HALT_REASON = "halt_reason"
@@ -72,7 +66,6 @@ def utc_now_iso() -> str:
 
 
 def connect(path: Path | str | None = None, *, readonly: bool = False) -> sqlite3.Connection:
-    """Open the database. WAL mode lets the bot write while the dashboard reads."""
     path = Path(path) if path is not None else settings.db_path
     if readonly:
         conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=10)
@@ -89,8 +82,6 @@ def init_db(conn: sqlite3.Connection) -> None:
     with conn:
         conn.executescript(SCHEMA)
 
-
-# --- state / flags -----------------------------------------------------------
 
 def get_state(conn: sqlite3.Connection, key: str, default: str | None = None) -> str | None:
     row = conn.execute("SELECT value FROM state WHERE key = ?", (key,)).fetchone()
@@ -115,12 +106,10 @@ def is_paused(conn: sqlite3.Connection) -> bool:
 
 
 def set_paused(conn: sqlite3.Connection, paused: bool) -> None:
-    """The only write the dashboard is allowed to make."""
     set_state(conn, PAUSED, "1" if paused else "0")
 
 
 def get_timeframe(conn: sqlite3.Connection) -> str | None:
-    """Timeframe chosen on the dashboard, or None to use the TIMEFRAME setting."""
     from bot.config import TIMEFRAMES
 
     value = get_state(conn, TIMEFRAME)
@@ -128,7 +117,6 @@ def get_timeframe(conn: sqlite3.Connection) -> str | None:
 
 
 def set_timeframe(conn: sqlite3.Connection, timeframe: str) -> None:
-    """The dashboard's second write: the candle timeframe the bot trades on."""
     from bot.config import TIMEFRAMES
 
     if timeframe not in TIMEFRAMES:
@@ -145,7 +133,6 @@ def halt_reason(conn: sqlite3.Connection) -> str:
 
 
 def set_halted(conn: sqlite3.Connection, reason: str) -> None:
-    """Persistent halt. Survives restarts; only bot.reset_halt clears it."""
     with conn:
         for key, value in ((HALTED, "1"), (HALT_REASON, reason), (HALTED_AT, utc_now_iso())):
             conn.execute(
@@ -159,8 +146,6 @@ def clear_halt(conn: sqlite3.Connection) -> None:
     with conn:
         conn.execute("DELETE FROM state WHERE key IN (?, ?, ?)", (HALTED, HALT_REASON, HALTED_AT))
 
-
-# --- writes ------------------------------------------------------------------
 
 def insert_trade(
     conn: sqlite3.Connection, side: str, fill: Fill, simulated: bool, timestamp: str | None = None
@@ -196,8 +181,6 @@ def insert_balance(
         )
 
 
-# --- reads -------------------------------------------------------------------
-
 def read_trades(conn: sqlite3.Connection) -> pd.DataFrame:
     df = pd.read_sql_query("SELECT * FROM trades ORDER BY id", conn)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
@@ -230,7 +213,6 @@ def last_trade_time(conn: sqlite3.Connection, side: str, simulated: bool) -> pd.
 
 
 def sim_balances(conn: sqlite3.Connection, start_usdc: float, start_sol: float) -> Balances:
-    """Simulated wallet = starting balances replayed through the simulated trades."""
     row = conn.execute(
         """
         SELECT

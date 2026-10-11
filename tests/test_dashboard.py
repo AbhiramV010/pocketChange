@@ -99,7 +99,6 @@ def test_button_mirrors_flag_set_elsewhere(app):
     at = run_app()
     assert at.button(key="resume").label == "RESUME"
 
-# --- static isolation rules ------------------------------------------------------
 
 def test_private_key_is_only_referenced_in_chain_module():
     offenders = []
@@ -135,8 +134,6 @@ def test_equity_curve_and_headroom_caption_render(app):
     assert at.get("vega_lite_chart") or at.get("arrow_vega_lite_chart")
     assert any("halt floor" in c.value and "headroom" in c.value for c in at.caption)
 
-
-# --- public read-only mode ---------------------------------------------------------
 
 @pytest.fixture
 def public_app(tmp_path, monkeypatch):
