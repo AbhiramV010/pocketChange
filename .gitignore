@@ -218,3 +218,23 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# pocketchange
+# Secrets and local state: never commit these.
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+data/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Local tooling / notes
+instruction.md
+.claude/
+arena/
