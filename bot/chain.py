@@ -17,6 +17,7 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.transaction import VersionedTransaction
 
+from bot.assets import ASSETS
 from bot.config import ROOT, Settings, settings
 from bot.db import Balances, Fill
 
@@ -62,13 +63,14 @@ class Quote:
     min_out_raw: int  # Jupiter's otherAmountThreshold: output after max slippage
     route: str
     response: dict  # passed back to Jupiter unchanged to build the transaction
+    decimals: int = SOL_DECIMALS  # of the traded asset (not USDC)
 
     @property
     def price(self) -> float:
         usdc_raw, sol_raw = (
             (self.amount_in_raw, self.amount_out_raw) if self.side == BUY else (self.amount_out_raw, self.amount_in_raw)
         )
-        return (usdc_raw / 10**USDC_DECIMALS) / (sol_raw / 10**SOL_DECIMALS)
+        return (usdc_raw / 10**USDC_DECIMALS) / (sol_raw / 10**self.decimals)
 
 
 @dataclass(frozen=True)
@@ -77,6 +79,7 @@ class Snapshot:
     lamports: int
     usdc: int
     wsol: int
+    extra: tuple[int, ...] = ()  # raw balances of the other assets, in ChainClient._extra order
 
 
 def to_raw(amount: float | Decimal | str, decimals: int) -> int:
@@ -102,11 +105,13 @@ def token_amount(account: dict | None) -> int:
     return int.from_bytes(data[64:72], "little")  # layout: mint(32) owner(32) amount(u64)
 
 
-def _mints(side: str) -> tuple[Pubkey, Pubkey, int, int]:
+def _mints(side: str, asset: str = "SOL") -> tuple[Pubkey, Pubkey, int, int]:
+    info = ASSETS[asset]
+    mint = WSOL_MINT if asset == "SOL" else Pubkey.from_string(info.mint)
     if side == BUY:
-        return USDC_MINT, WSOL_MINT, USDC_DECIMALS, SOL_DECIMALS
+        return USDC_MINT, mint, USDC_DECIMALS, info.decimals
     if side == SELL:
-        return WSOL_MINT, USDC_MINT, SOL_DECIMALS, USDC_DECIMALS
+        return mint, USDC_MINT, info.decimals, USDC_DECIMALS
     raise ValueError(f"side must be 'buy' or 'sell', got {side!r}")
 
 
@@ -147,6 +152,8 @@ class ChainClient:
         self.address = str(self.owner)
         self.usdc_account = ata(self.owner, USDC_MINT)
         self.wsol_account = ata(self.owner, WSOL_MINT)
+        self._extra = [a for a in cfg.assets + cfg.risky_assets if a != "SOL"]  # other assets, fixed order
+        self.asset_accounts = {a: ata(self.owner, Pubkey.from_string(ASSETS[a].mint)) for a in self._extra}
         self._verified = False  # cluster/mint check runs on first use, so a flaky RPC at startup can be retried
 
     def __repr__(self) -> str:
@@ -189,35 +196,50 @@ class ChainClient:
             return
         if self._rpc("getGenesisHash") != MAINNET_GENESIS:
             raise ChainError("SOLANA_RPC_URL is not Solana mainnet-beta")
-        for label, mint, decimals in (("USDC", USDC_MINT, USDC_DECIMALS), ("wSOL", WSOL_MINT, SOL_DECIMALS)):
+        checks = [("USDC", USDC_MINT, USDC_DECIMALS), ("wSOL", WSOL_MINT, SOL_DECIMALS)]
+        checks += [(ASSETS[a].label, Pubkey.from_string(ASSETS[a].mint), ASSETS[a].decimals) for a in self._extra]
+        for label, mint, decimals in checks:
             info = self._rpc("getAccountInfo", [str(mint), {"encoding": "jsonParsed"}])["value"]
             parsed = (info or {}).get("data", {}).get("parsed", {})
             if info is None or info["owner"] != str(TOKEN_PROGRAM) or parsed.get("info", {}).get("decimals") != decimals:
                 raise ChainError(f"{label} mint does not look right on this cluster")
         self._verified = True
 
+    def _addresses(self) -> list[str]:
+        return [self.address, str(self.usdc_account), str(self.wsol_account)] + [
+            str(self.asset_accounts[a]) for a in self._extra
+        ]
+
+    @staticmethod
+    def _parse(accounts: list) -> Snapshot:
+        owner, usdc, wsol, *rest = accounts
+        return Snapshot(
+            (owner or {}).get("lamports", 0), token_amount(usdc), token_amount(wsol), tuple(token_amount(a) for a in rest)
+        )
+
+    def _raw(self, snap: Snapshot, asset: str) -> int:
+        return snap.wsol if asset == "SOL" else snap.extra[self._extra.index(asset)]
+
     def _snapshot(self) -> Snapshot:
         accounts = self._rpc(
-            "getMultipleAccounts",
-            [
-                [self.address, str(self.usdc_account), str(self.wsol_account)],
-                {"encoding": "base64", "commitment": "confirmed"},
-            ],
+            "getMultipleAccounts", [self._addresses(), {"encoding": "base64", "commitment": "confirmed"}]
         )["value"]
-        owner, usdc, wsol = accounts
-        return Snapshot((owner or {}).get("lamports", 0), token_amount(usdc), token_amount(wsol))
+        return self._parse(accounts)
 
     @_guard
     def balances(self) -> Balances:
         self._ensure_verified()
         snap = self._snapshot()
         return Balances(
-            from_raw(snap.usdc, USDC_DECIMALS), from_raw(snap.lamports, SOL_DECIMALS), from_raw(snap.wsol, SOL_DECIMALS)
+            from_raw(snap.usdc, USDC_DECIMALS),
+            from_raw(snap.lamports, SOL_DECIMALS),
+            from_raw(snap.wsol, SOL_DECIMALS),
+            {a: from_raw(self._raw(snap, a), ASSETS[a].decimals) for a in self._extra},
         )
 
     @_guard
-    def quote(self, side: str, amount_in_raw: int) -> Quote:
-        mint_in, mint_out, _, _ = _mints(side)
+    def quote(self, side: str, amount_in_raw: int, asset: str = "SOL") -> Quote:
+        mint_in, mint_out, _, _ = _mints(side, asset)
         q = self._jupiter(
             "quote",
             params={
@@ -237,17 +259,19 @@ class ChainClient:
         if out <= 0 or min_out < min_amount_out(out, self._cfg.max_slippage_bps):
             raise ChainError("Jupiter quote has an unexpected minimum output")
         route = " > ".join(step.get("swapInfo", {}).get("label", "?") for step in q.get("routePlan", []))
-        return Quote(side, amount_in_raw, out, min_out, route, q)
+        return Quote(side, amount_in_raw, out, min_out, route, q, ASSETS[asset].decimals)
 
     @_guard
-    def swap(self, side: str, amount_in: float, ref_price: float) -> Fill:
+    def swap(self, side: str, amount_in: float, ref_price: float, asset: str = "SOL") -> Fill:
         cfg = self._cfg
+        if asset != "SOL" and asset not in self._extra:
+            raise SwapFailed(f"{asset} is not one of the configured ASSETS")
         if self._keypair is None:
             raise ChainError("read-only client cannot swap")
         if cfg.dry_run:
             raise ChainError("refusing to send a transaction while DRY_RUN is true")
         self._ensure_verified()
-        _, _, dec_in, dec_out = _mints(side)
+        _, _, dec_in, dec_out = _mints(side, asset)
         cap_raw = to_raw(cfg.max_trade_usdc, USDC_DECIMALS)
         amount_in_raw = to_raw(amount_in, dec_in)
         if amount_in_raw <= 0:
@@ -260,14 +284,14 @@ class ChainClient:
             raise SwapFailed(
                 f"native SOL {from_raw(before.lamports, SOL_DECIMALS):.6f} is below GAS_RESERVE_SOL={cfg.gas_reserve_sol}"
             )
-        if amount_in_raw > (before.usdc if side == BUY else before.wsol):
+        if amount_in_raw > (before.usdc if side == BUY else self._raw(before, asset)):
             raise SwapFailed("insufficient balance for this swap")
 
-        quote = self.quote(side, amount_in_raw)
+        quote = self.quote(side, amount_in_raw, asset)
         if side == SELL and quote.amount_out_raw > cap_raw:
             # Keep the USD value of a sell under the hard cap: shrink and re-quote.
             amount_in_raw = amount_in_raw * cap_raw * 999 // (quote.amount_out_raw * 1000)
-            quote = self.quote(side, amount_in_raw)
+            quote = self.quote(side, amount_in_raw, asset)
             if amount_in_raw <= 0 or quote.amount_out_raw > cap_raw:
                 raise SwapFailed("could not size sell under MAX_TRADE_USDC")
         deviation_bps = abs(quote.price / ref_price - 1) * 10_000
@@ -297,13 +321,13 @@ class ChainClient:
         last_valid = int(built["lastValidBlockHeight"])
         self._check_message(tx)
         signed = self._sign(tx)
-        self._check_simulation(signed, side, quote, before, ref_price)
+        self._check_simulation(signed, side, quote, before, ref_price, asset)
         signature = str(signed.signatures[0])
         self._send_and_confirm(signed, signature, last_valid)
 
         after = self._settled_snapshot(before)
-        spent = (before.usdc - after.usdc) if side == BUY else (before.wsol - after.wsol)
-        got = (after.wsol - before.wsol) if side == BUY else (after.usdc - before.usdc)
+        spent = (before.usdc - after.usdc) if side == BUY else (self._raw(before, asset) - self._raw(after, asset))
+        got = (self._raw(after, asset) - self._raw(before, asset)) if side == BUY else (after.usdc - before.usdc)
         if spent <= 0 or got <= 0:
             log.warning("could not read the swap result from balances; recording the quoted amounts")
             spent, got = amount_in_raw, quote.amount_out_raw
@@ -322,7 +346,13 @@ class ChainClient:
         return VersionedTransaction(tx.message, [self._keypair])
 
     def _check_simulation(
-        self, tx: VersionedTransaction, side: str, quote: Quote, before: Snapshot, ref_price: float
+        self,
+        tx: VersionedTransaction,
+        side: str,
+        quote: Quote,
+        before: Snapshot,
+        ref_price: float,
+        asset: str = "SOL",
     ) -> None:
         result = self._rpc(
             "simulateTransaction",
@@ -332,20 +362,16 @@ class ChainClient:
                     "encoding": "base64",
                     "commitment": "confirmed",
                     "sigVerify": False,
-                    "accounts": {
-                        "encoding": "base64",
-                        "addresses": [self.address, str(self.usdc_account), str(self.wsol_account)],
-                    },
+                    "accounts": {"encoding": "base64", "addresses": self._addresses()},
                 },
             ],
         )["value"]
         if result.get("err") is not None:
             logs = " | ".join((result.get("logs") or [])[-3:])
             raise SwapFailed(f"simulation failed: {json.dumps(result['err'])[:120]} {logs[:200]}")
-        owner, usdc, wsol = result["accounts"]
-        after = Snapshot((owner or {}).get("lamports", 0), token_amount(usdc), token_amount(wsol))
-        spent = (before.usdc - after.usdc) if side == BUY else (before.wsol - after.wsol)
-        got = (after.wsol - before.wsol) if side == BUY else (after.usdc - before.usdc)
+        after = self._parse(result["accounts"])
+        spent = (before.usdc - after.usdc) if side == BUY else (self._raw(before, asset) - self._raw(after, asset))
+        got = (self._raw(after, asset) - self._raw(before, asset)) if side == BUY else (after.usdc - before.usdc)
         sol_cost = before.lamports - after.lamports
         if spent > quote.amount_in_raw:
             raise SwapFailed(f"simulation spends {spent}, more than the requested {quote.amount_in_raw}")
@@ -403,10 +429,10 @@ class ChainClient:
 
 # Command line: a read-only check and a manual swap for the first live test.
 
-def _reference_price() -> float:
+def _reference_price(asset: str = "SOL") -> float:
     from bot import data
 
-    return float(data.fetch_recent(limit=3)["close"].iloc[-1])
+    return float(data.fetch_recent(limit=3, symbol=ASSETS[asset].market)["close"].iloc[-1])
 
 
 def _cli_check(client: ChainClient) -> None:
@@ -418,6 +444,16 @@ def _cli_check(client: ChainClient) -> None:
         _, _, dec_in, _ = _mints(side)
         q = client.quote(side, to_raw(amount, dec_in))
         print(f"quote {side:<4} ~$1: price {q.price:.2f} ({(q.price / ref - 1) * 1e4:+.0f} bps vs reference) via {q.route}")
+    from bot import data
+
+    for asset in client._extra:
+        info = ASSETS[asset]
+        asset_ref = float(data.fetch_recent(limit=3, symbol=info.market)["close"].iloc[-1])
+        q = client.quote(BUY, to_raw(1.0, USDC_DECIMALS), asset)
+        print(
+            f"{info.label:<5} buy ~$1: price {q.price:.6g} ({(q.price / asset_ref - 1) * 1e4:+.0f} bps vs "
+            f"reference {asset_ref:.6g}) via {q.route}"
+        )
 
 
 def new_wallet(env_path: Path, force: bool = False) -> str:
@@ -445,6 +481,7 @@ def main(argv: list[str] | None = None) -> None:
     swap = sub.add_parser("swap", help="REAL swap; needs DRY_RUN=false. buy: amount in USDC, sell: amount in wSOL")
     swap.add_argument("side", choices=[BUY, SELL])
     swap.add_argument("amount", type=float)
+    swap.add_argument("--asset", default="SOL", help="asset symbol from ASSETS (default SOL)")
     swap.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     wallet = sub.add_parser("new-wallet", help="create a dedicated bot wallet and save its key to .env")
     wallet.add_argument("--force", action="store_true", help="replace an existing PRIVATE_KEY")
@@ -469,12 +506,12 @@ def main(argv: list[str] | None = None) -> None:
     if settings.dry_run:
         raise SystemExit("DRY_RUN is true. Set DRY_RUN=false in .env to send a real transaction.")
     client = ChainClient()
-    ref = _reference_price()
-    unit = "USDC" if args.side == BUY else "wSOL"
+    ref = _reference_price(args.asset)
+    unit = "USDC" if args.side == BUY else ASSETS[args.asset].label
     print(f"About to {args.side} {args.amount} {unit} from {client.address} (limit MAX_TRADE_USDC={settings.max_trade_usdc}).")
     if not args.yes and input("Type 'yes' to send: ").strip().lower() != "yes":
         raise SystemExit("Aborted.")
-    fill = client.swap(args.side, args.amount, ref)
+    fill = client.swap(args.side, args.amount, ref, args.asset)
     print(f"Done: in {fill.amount_in:.9f}, out {fill.amount_out:.9f}, price {fill.price:.2f}, tx {fill.tx_hash}")
     print(f"https://solscan.io/tx/{fill.tx_hash}")
 

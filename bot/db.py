@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import NamedTuple
+from typing import Mapping, NamedTuple
 
 import pandas as pd
 
@@ -14,11 +15,12 @@ CREATE TABLE IF NOT EXISTS trades (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TEXT    NOT NULL,
     side      TEXT    NOT NULL CHECK (side IN ('buy', 'sell')),
-    amount_in  REAL   NOT NULL,   -- buy: USDC spent, sell: wSOL sold
-    amount_out REAL   NOT NULL,   -- buy: wSOL received, sell: USDC received
-    price     REAL    NOT NULL,   -- USDC per SOL actually obtained
+    amount_in  REAL   NOT NULL,   -- buy: USDC spent, sell: asset sold
+    amount_out REAL   NOT NULL,   -- buy: asset received, sell: USDC received
+    price     REAL    NOT NULL,   -- USDC per unit of the asset actually obtained
     tx_hash   TEXT,
-    simulated INTEGER NOT NULL DEFAULT 1 CHECK (simulated IN (0, 1))
+    simulated INTEGER NOT NULL DEFAULT 1 CHECK (simulated IN (0, 1)),
+    asset     TEXT    NOT NULL DEFAULT 'SOL'
 );
 CREATE TABLE IF NOT EXISTS balances (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -27,14 +29,37 @@ CREATE TABLE IF NOT EXISTS balances (
     sol       REAL    NOT NULL,   -- native SOL (fees, never traded)
     wsol      REAL    NOT NULL,   -- wrapped SOL: the trading position
     price     REAL,               -- SOL/USD mark at the time, NULL if unavailable
-    simulated INTEGER NOT NULL DEFAULT 1 CHECK (simulated IN (0, 1))
+    simulated INTEGER NOT NULL DEFAULT 1 CHECK (simulated IN (0, 1)),
+    holdings  TEXT                -- JSON {symbol: [qty, price]} for every non-SOL asset held or marked
 );
 CREATE INDEX IF NOT EXISTS idx_balances_timestamp ON balances (timestamp);
 CREATE TABLE IF NOT EXISTS state (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS snipes (   -- simulated new-token sniper: a sandbox that never touches the wallet
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    mint          TEXT    NOT NULL UNIQUE,
+    symbol        TEXT    NOT NULL,
+    decimals      INTEGER NOT NULL,
+    opened_at     TEXT    NOT NULL,
+    entry_usdc    REAL    NOT NULL,
+    qty_raw       INTEGER NOT NULL,
+    liquidity_usd REAL,
+    status        TEXT    NOT NULL CHECK (status IN ('open', 'closed')),
+    closed_at     TEXT,
+    exit_usdc     REAL,
+    reason        TEXT,
+    last_value    REAL,           -- latest executable sell value of an open snipe
+    last_checked  TEXT,
+    fail_count    INTEGER NOT NULL DEFAULT 0
+);
 """
+
+MIGRATIONS = (  # columns added after the first release: (table, column, definition)
+    ("trades", "asset", "TEXT NOT NULL DEFAULT 'SOL'"),
+    ("balances", "holdings", "TEXT"),
+)
 
 PAUSED = "paused"
 HALTED = "halted"
@@ -46,12 +71,22 @@ TIMEFRAME = "timeframe"
 DONE_SIGNAL = "done_signal"
 ATTEMPT_SIGNAL = "attempt_signal"
 ATTEMPT_COUNT = "attempt_count"
+RISKY = "risky"
+ML_SCORES = "ml_scores"  # latest P(win) per coin, written by the bot for the dashboard
+ML_INFO = "ml_info"  # which model is live: when trained, out-of-sample AUC, thresholds
 
 
 class Balances(NamedTuple):
     usdc: float
     sol: float  # native SOL, kept for fees and never traded
     wsol: float  # wrapped SOL, the trading position
+    extra: Mapping[str, float] = {}  # every other traded asset, by symbol
+
+    def qty(self, asset: str) -> float:
+        return self.wsol if asset == "SOL" else self.extra.get(asset, 0.0)
+
+    def positions(self) -> dict[str, float]:
+        return {"SOL": self.wsol, **self.extra}
 
 
 class Fill(NamedTuple):
@@ -81,6 +116,10 @@ def connect(path: Path | str | None = None, *, readonly: bool = False) -> sqlite
 def init_db(conn: sqlite3.Connection) -> None:
     with conn:
         conn.executescript(SCHEMA)
+        for table, column, definition in MIGRATIONS:
+            columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in columns:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def get_state(conn: sqlite3.Connection, key: str, default: str | None = None) -> str | None:
@@ -124,6 +163,25 @@ def set_timeframe(conn: sqlite3.Connection, timeframe: str) -> None:
     set_state(conn, TIMEFRAME, timeframe)
 
 
+def is_risky(conn: sqlite3.Connection, default: bool = False) -> bool:
+    return get_state(conn, RISKY, "1" if default else "0") == "1"
+
+
+def set_risky(conn: sqlite3.Connection, risky: bool) -> None:
+    set_state(conn, RISKY, "1" if risky else "0")
+
+
+def set_ml(conn: sqlite3.Connection, scores: Mapping[str, float], info: Mapping[str, object] | None) -> None:
+    set_state(conn, ML_SCORES, json.dumps({a: round(p, 4) for a, p in scores.items()}))
+    if info is not None:
+        set_state(conn, ML_INFO, json.dumps(info))
+
+
+def get_ml(conn: sqlite3.Connection) -> tuple[dict[str, float], dict]:
+    scores, info = get_state(conn, ML_SCORES), get_state(conn, ML_INFO)
+    return (json.loads(scores) if scores else {}), (json.loads(info) if info else {})
+
+
 def is_halted(conn: sqlite3.Connection) -> bool:
     return _flag(conn, HALTED)
 
@@ -148,12 +206,17 @@ def clear_halt(conn: sqlite3.Connection) -> None:
 
 
 def insert_trade(
-    conn: sqlite3.Connection, side: str, fill: Fill, simulated: bool, timestamp: str | None = None
+    conn: sqlite3.Connection,
+    side: str,
+    fill: Fill,
+    simulated: bool,
+    timestamp: str | None = None,
+    asset: str = "SOL",
 ) -> int:
     with conn:
         cur = conn.execute(
-            "INSERT INTO trades (timestamp, side, amount_in, amount_out, price, tx_hash, simulated) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO trades (timestamp, side, amount_in, amount_out, price, tx_hash, simulated, asset) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 timestamp or utc_now_iso(),
                 side,
@@ -162,6 +225,7 @@ def insert_trade(
                 fill.price,
                 fill.tx_hash,
                 int(simulated),
+                asset,
             ),
         )
     return cur.lastrowid or 0
@@ -173,16 +237,31 @@ def insert_balance(
     price: float | None,
     simulated: bool,
     timestamp: str | None = None,
+    prices: Mapping[str, float] | None = None,
 ) -> None:
+    prices = prices or {}
+    holdings = {
+        a: [qty, prices.get(a)] for a, qty in balances.extra.items() if qty > 0 or prices.get(a) is not None
+    }
     with conn:
         conn.execute(
-            "INSERT INTO balances (timestamp, usdc, sol, wsol, price, simulated) VALUES (?, ?, ?, ?, ?, ?)",
-            (timestamp or utc_now_iso(), balances.usdc, balances.sol, balances.wsol, price, int(simulated)),
+            "INSERT INTO balances (timestamp, usdc, sol, wsol, price, simulated, holdings) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                timestamp or utc_now_iso(),
+                balances.usdc,
+                balances.sol,
+                balances.wsol,
+                price,
+                int(simulated),
+                json.dumps(holdings) if holdings else None,
+            ),
         )
 
 
 def read_trades(conn: sqlite3.Connection) -> pd.DataFrame:
     df = pd.read_sql_query("SELECT * FROM trades ORDER BY id", conn)
+    if "asset" not in df:  # database from before multi-asset support, not yet migrated by the bot
+        df["asset"] = "SOL"
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     df["simulated"] = df["simulated"].astype(bool)
     return df
@@ -195,32 +274,140 @@ def read_balances(conn: sqlite3.Connection, since: datetime | None = None) -> pd
         df = pd.read_sql_query(
             "SELECT * FROM balances WHERE timestamp >= ? ORDER BY id", conn, params=(since.isoformat(),)
         )
+    if "holdings" not in df:
+        df["holdings"] = None
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     df["simulated"] = df["simulated"].astype(bool)
     return df
+
+
+def holdings_of(raw: str | None) -> dict[str, tuple[float, float | None]]:
+    """Decode a balances.holdings JSON cell into {symbol: (qty, price)}."""
+    if not raw or not isinstance(raw, str):
+        return {}
+    return {a: (float(qty), None if price is None else float(price)) for a, (qty, price) in json.loads(raw).items()}
+
+
+def holdings_value(raw: str | None) -> float:
+    return sum(qty * price for qty, price in holdings_of(raw).values() if price)
+
+
+def row_equity(row) -> float | None:
+    """USDC plus every position at its recorded mark. None if SOL is held without a price."""
+    sol_value = 0.0
+    if row["wsol"]:
+        if row["price"] is None:
+            return None
+        sol_value = row["wsol"] * row["price"]
+    return row["usdc"] + sol_value + holdings_value(row["holdings"] if "holdings" in row.keys() else None)
+
+
+def last_marks(conn: sqlite3.Connection) -> dict[str, float]:
+    """Latest known price per symbol from the newest snapshots (for the floor during feed outages)."""
+    marks: dict[str, float] = {}
+    for row in conn.execute("SELECT price, holdings FROM balances ORDER BY id DESC LIMIT 200"):
+        if row["price"] is not None:
+            marks.setdefault("SOL", row["price"])
+        for asset, (_, price) in holdings_of(row["holdings"]).items():
+            if price is not None:
+                marks.setdefault(asset, price)
+    return marks
 
 
 def latest_balance(conn: sqlite3.Connection) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM balances ORDER BY id DESC LIMIT 1").fetchone()
 
 
-def last_trade_time(conn: sqlite3.Connection, side: str, simulated: bool) -> pd.Timestamp | None:
+def last_trade_time(conn: sqlite3.Connection, side: str, simulated: bool, asset: str = "SOL") -> pd.Timestamp | None:
     row = conn.execute(
-        "SELECT timestamp FROM trades WHERE side = ? AND simulated = ? ORDER BY id DESC LIMIT 1",
-        (side, int(simulated)),
+        "SELECT timestamp FROM trades WHERE side = ? AND simulated = ? AND asset = ? ORDER BY id DESC LIMIT 1",
+        (side, int(simulated), asset),
     ).fetchone()
     return pd.Timestamp(row["timestamp"]) if row else None
 
 
+def open_position(conn: sqlite3.Connection, asset: str, simulated: bool) -> tuple[float, float, pd.Timestamp | None]:
+    """(quantity, average entry price, time of the latest buy) replayed from the trade log."""
+    qty = cost = 0.0
+    since = None
+    rows = conn.execute(
+        "SELECT timestamp, side, amount_in, amount_out FROM trades WHERE simulated = ? AND asset = ? ORDER BY id",
+        (int(simulated), asset),
+    )
+    for row in rows:
+        if row["side"] == "buy":
+            qty += row["amount_out"]
+            cost += row["amount_in"]
+            since = pd.Timestamp(row["timestamp"])
+        elif qty > 0:
+            avg = cost / qty
+            cost -= avg * row["amount_in"]
+            qty -= row["amount_in"]
+    if qty <= 1e-12:
+        return 0.0, 0.0, None
+    return qty, cost / qty, since
+
+
 def sim_balances(conn: sqlite3.Connection, start_usdc: float, start_sol: float) -> Balances:
-    row = conn.execute(
+    rows = conn.execute(
         """
         SELECT
-          COALESCE(SUM(CASE WHEN side = 'buy'  THEN -amount_in  ELSE amount_out END), 0) AS usdc_delta,
-          COALESCE(SUM(CASE WHEN side = 'buy'  THEN  amount_out ELSE -amount_in  END), 0) AS wsol_delta
-        FROM trades WHERE simulated = 1
+          asset,
+          COALESCE(SUM(CASE WHEN side = 'buy' THEN -amount_in  ELSE amount_out END), 0) AS usdc_delta,
+          COALESCE(SUM(CASE WHEN side = 'buy' THEN  amount_out ELSE -amount_in  END), 0) AS qty_delta
+        FROM trades WHERE simulated = 1 GROUP BY asset
+        """
+    ).fetchall()
+    usdc = max(start_usdc + sum(r["usdc_delta"] for r in rows), 0.0)
+    qty = {r["asset"]: max(r["qty_delta"], 0.0) for r in rows}
+    return Balances(usdc, start_sol, qty.get("SOL", 0.0), {a: q for a, q in qty.items() if a != "SOL"})
+
+
+# Simulated new-token sniper: a sandbox with its own bankroll that never touches the wallet.
+
+def open_snipe(
+    conn: sqlite3.Connection, *, mint: str, symbol: str, decimals: int, entry_usdc: float, qty_raw: int,
+    liquidity_usd: float | None, timestamp: str | None = None,
+) -> None:
+    with conn:
+        conn.execute(
+            "INSERT INTO snipes (mint, symbol, decimals, opened_at, entry_usdc, qty_raw, liquidity_usd, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'open')",
+            (mint, symbol, decimals, timestamp or utc_now_iso(), entry_usdc, qty_raw, liquidity_usd),
+        )
+
+
+def mark_snipe(conn: sqlite3.Connection, snipe_id: int, value: float | None, fail_count: int, timestamp: str) -> None:
+    with conn:
+        conn.execute(
+            "UPDATE snipes SET last_value = COALESCE(?, last_value), fail_count = ?, last_checked = ? WHERE id = ?",
+            (value, fail_count, timestamp, snipe_id),
+        )
+
+
+def close_snipe(conn: sqlite3.Connection, snipe_id: int, exit_usdc: float, reason: str, timestamp: str) -> None:
+    with conn:
+        conn.execute(
+            "UPDATE snipes SET status = 'closed', exit_usdc = ?, reason = ?, closed_at = ?, last_value = ? WHERE id = ?",
+            (exit_usdc, reason, timestamp, exit_usdc, snipe_id),
+        )
+
+
+def read_snipes(conn: sqlite3.Connection) -> pd.DataFrame:
+    try:
+        df = pd.read_sql_query("SELECT * FROM snipes ORDER BY id", conn)
+    except Exception:  # database from before the sniper existed
+        return pd.DataFrame(columns=["id", "mint", "symbol", "status"])
+    for col in ("opened_at", "closed_at", "last_checked"):
+        df[col] = pd.to_datetime(df[col], utc=True)
+    return df
+
+
+def sniper_free_usdc(conn: sqlite3.Connection, bankroll: float) -> float:
+    row = conn.execute(
+        """
+        SELECT COALESCE(SUM(CASE WHEN status = 'open' THEN -entry_usdc
+                                 ELSE COALESCE(exit_usdc, 0) - entry_usdc END), 0) AS delta FROM snipes
         """
     ).fetchone()
-    usdc = max(start_usdc + row["usdc_delta"], 0.0)
-    wsol = max(row["wsol_delta"], 0.0)
-    return Balances(usdc=usdc, sol=start_sol, wsol=wsol)
+    return bankroll + row["delta"]

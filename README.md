@@ -73,7 +73,21 @@ Set these in `.env` (see `.env.example`). Real environment variables override `.
 | `MAX_SLIPPAGE_BPS` | `100` | Slippage passed to Jupiter and checked against the simulation (100 = 1%). |
 | `MIN_EQUITY_USD` | `15` | Equity floor; below it the bot halts. Set it from your real starting balance (see below). |
 | `GAS_RESERVE_SOL` | `0.01` | Native SOL the bot never trades. It also refuses to trade if the wallet has less. |
-| `STRATEGY` | `sma` | `sma` (20/50 crossover on 1h closes) or `dca`. |
+| `STRATEGY` | `sma` | `sma` (the moving-average signal below), `ml` (the AI) or `dca`. |
+| `ML_HORIZON` / `ML_TARGET_PCT` | `6` / `0.4` | What the AI predicts: will the coin gain more than this percent over the next N candles? |
+| `ML_ENTER` / `ML_EXIT` | `0.6` / `0.45` | Buy when the AI's probability is at least `ML_ENTER`; sell when it falls to `ML_EXIT` or below. |
+| `ML_RETRAIN_HOURS` / `ML_TRAIN_DAYS` | `24` / `400` | The AI retrains itself on fresh candles this often, using this much history. |
+| `ASSETS` | `SOL` | Coins traded all the time, each with its own signal and position: `SOL`, `BTC`, `ETH`, `BNB`, `XRP`, `DOGE`, `AVAX`. SOL is always included. `.env.example` turns on `SOL,BTC,ETH,BNB,XRP,DOGE`. |
+| `RISKY_ASSETS` | none | Memecoins traded only while the yellow RISKY switch is on: `BONK`, `WIF`, `TRUMP`, `PENGU`. |
+| `RISKY` | `false` | Starting state of the RISKY switch. The dashboard switch overrides it once clicked. |
+| `MAX_POSITIONS` | `3` | Most coins held at once. When several want in, the strongest momentum goes first. |
+| `TIMEFRAME` | `1h` | Candle size: `1m`, `5m`, `15m`, `30m`, `1h`, `4h`. The dashboard can switch it live. |
+| `SMA_FAST` / `SMA_SLOW` / `ENTRY` | `20` / `50` / `cross` | Moving-average periods, and `trend` (long whenever fast > slow) or `cross` (act only on the crossover). |
+| `EDGE_BPS` / `TREND_CONFIRM` | `0` / `false` | Entry filters: fast must beat slow by this many bps; and the slow average must be rising with price above it. |
+| `STOP_ATR` / `HARD_STOP_PCT` | `0` / `0` | Exits: trailing stop N ATRs under the highest close since entry; and a stop this % under the entry price. `0` is off. |
+| `REENTRY_CANDLES` | `0` | Candles to wait after a sell before buying that coin again. |
+| `REGIME_LEN` | `0` | Open new positions only while BTC is above its moving average of this many candles. Exits never wait. `0` is off. |
+| `SNIPER` and `SNIPER_*` | on | Settings for the simulated new-token sniper (see below). Dry run only. |
 | `DCA_AMOUNT_USDC` / `DCA_INTERVAL_HOURS` | `1` / `24` | DCA buy size (still capped by `MAX_TRADE_USDC`) and interval. |
 | `LOOP_INTERVAL_SECONDS` | `60` | Seconds between cycles. Pause and halt take effect within one cycle. |
 | `SIM_START_USDC` / `SIM_START_SOL` | `20` / `0.05` | Starting balances for the dry-run simulator. |
@@ -112,13 +126,48 @@ The bot checks the cluster's genesis hash and both mints (owner program and deci
 | --- | --- | --- |
 | USDC (Circle) | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` | 6 |
 | wSOL (native mint) | `So11111111111111111111111111111111111111112` | 9 |
+| wBTC, wETH, wBNB, wXRP (Wormhole) | see `bot/assets.py` | 8, 8, 8, 6 |
+| DOGE, AVAX | see `bot/assets.py` | 8, 9 |
+| BONK, WIF, TRUMP, PENGU (risky) | see `bot/assets.py` | 5, 6, 6, 6 |
 
+Every mint in `bot/assets.py` was checked on-chain and quoted through Jupiter both ways for $5 (the round trip came back within 0.4%). Two caveats. **wXRP** carries a freeze authority (the bridge could freeze balances), and its Solana price sat about 6% above the exchange price when checked, so the quote-deviation guard (`MAX_QUOTE_DEVIATION_BPS`) will refuse live wXRP buys until the gap closes; in a dry run it fills at the exchange price. **Dry-run fills** use the exchange price plus a fixed 0.3% fee and 0.1% slippage, which is pessimistic for the big coins (their measured round trips cost 0.01% to 0.35%).
 ### Strategies (`bot/strategy.py`, pure functions)
 
-- **SMA crossover**: BUY on the candle where the 20-period SMA crosses above the 50-period, SELL on the cross below. It uses closed candles only and does not stack positions. A sell larger than `MAX_TRADE_USDC` is worked off one capped chunk per cycle.
+- **Moving-average trend** (`STRATEGY=sma`): per coin, on closed candles only. Long while the fast average is above the slow one; flat when it falls below. Filters make it pickier: `EDGE_BPS` (fast must beat slow by a margin), `TREND_CONFIRM` (slow average rising, price above it), `STOP_ATR` and `HARD_STOP_PCT` (cut a position that turns against you), `REENTRY_CANDLES` (no instant re-buy after a sell) and `REGIME_LEN` (open positions only while BTC is above its long average). With every filter off it is the plain 20/50 crossover. A sell larger than `MAX_TRADE_USDC` is worked off one capped chunk per cycle.
 - **DCA**: a fixed buy every `DCA_INTERVAL_HOURS`. It never sells.
 
-The backtest and the bot call the same strategy and sizing functions.
+The signal rules are array functions shared by the live loop and the backtest, so they cannot drift apart. Each cycle the bot plans every coin first, runs the sells (to free cash), then the buys in order of momentum, until `MAX_POSITIONS` or the cash runs out. Each coin keeps its own "already acted on this candle" state.
+
+### The AI (`STRATEGY=ml`, `bot/ml.py`)
+
+A gradient-boosted classifier (scikit-learn) trained on about a year of hourly candles for every coin at once. For each coin and closed candle it computes 29 features (returns over 1 to 48 candles, volatility, ATR, distance from moving averages, RSI, volume, position in the 24-candle range, time of day and week, and BTC's own trend as market context) and outputs the probability that the coin gains more than `ML_TARGET_PCT` over the next `ML_HORIZON` candles. The bot buys the highest probabilities first, once they reach `ML_ENTER`, and sells when the probability falls to `ML_EXIT` or after the horizon passes without the AI still liking it. Everything else is unchanged: the $5 cap, `MAX_POSITIONS`, ATR and hard stops, the equity floor, STOP and RISKY.
+
+- `python -m bot.ml train` fits the model on all history and saves `data/models/ml_1h.joblib`. If a model is missing or older than `ML_RETRAIN_HOURS`, the running bot retrains itself in a background thread and swaps the new model in; a failed retrain keeps the old one. There is one model per timeframe, so switching the dashboard to a timeframe with no model means no trades until one is trained.
+- `python -m bot.ml eval` runs the **walk-forward test**: for each 30-day block after the first 180 days, it trains only on data from before the block (with a gap equal to the horizon, so no label peeks into the block) and scores the block. A test checks that predictions for a block do not change if later data is removed.
+- The dashboard shows each coin's current probability, and when the model was trained and how it scored out of sample.
+
+**What the AI achieved out of sample.** Eight monthly blocks (Feb to Oct 2026), 7 coins traded, hourly candles, 0.1% cost per side, buying at 0.6+ and selling at 0.45 or below. "Win" means the coin gains more than the target over the next N candles.
+
+| What the AI predicts | Out-of-sample AUC | Pure AI | With BTC filter + stops |
+| --- | --- | --- | --- |
+| +0.4% in 6 candles | 0.533 | -13.5% (138 trades) | -2.6% (38) |
+| +0.8% in 12 | 0.517 | -16.8% (132) | -2.9% (42) |
+| +1.2% in 24 | 0.496 | -9.4% (76) | -3.0% (34) |
+| +2.0% in 24 | 0.531 | -5.8% (40) | -0.8% (4) |
+| +2.0% in 48 | 0.494 | -14.4% (98) | -3.6% (36) |
+| +3.0% in 48 | 0.523 | -3.2% (48) | -0.8% (12) |
+
+Equal-weight buy and hold made **+15.3%** over the same window. An AUC of 0.5 is a coin flip, so 0.53 means the model sees *something*, but not enough to pay for fees: **every variant lost money after costs**. The BTC filter (`REGIME_LEN=400`) and the stops cut the losses a lot, mostly by trading much less. The defaults (6-candle horizon, `ML_ENTER=0.6`) are the setting with the best AUC that still trades often enough to watch, **not a profitable one**. Treat `STRATEGY=ml` as an experiment to observe in a dry run; do not fund a live wallet on it. Add `REGIME_LEN=400` to `.env` if you want it to behave more cautiously.
+
+### Coins and the RISKY switch
+
+The yellow **RISKY** switch beside STOP on the dashboard turns on memecoin trading. Off (the default), only `ASSETS` trade. On:
+
+- the coins in `RISKY_ASSETS` (BONK, WIF, TRUMP, PENGU) join the same strategy, with the same caps and checks;
+- in a dry run, a **simulated sniper** also scans Jupiter's list of brand-new tokens every 30 seconds. It keeps its own $10 bankroll in a separate table, and never touches the wallet or the equity floor. Entries need: mint and freeze authority revoked, liquidity of at least $3k, at least 5 holders, age under 15 minutes, no serial-launcher deployer, no concentrated top holders, a buy price impact under 3%, and a sell quote that returns at least 85% of the cost. Exits at +50%, -20%, 30 minutes, or when the sell route disappears (a rug, written off at zero). Both legs take a 2% haircut for being late;
+- turning RISKY off stops new memecoin entries, but open positions still exit on their signals, so nothing is stranded.
+
+The sniper is **simulation only** by design: `bot.run` never starts it unless `DRY_RUN=true`. A real new-token sniper needs per-token swap simulation for honeypots and transfer fees, and a poll every 30 seconds is always late against bots that act within a slot.
 
 ### Safety rails
 
@@ -127,10 +176,10 @@ The backtest and the bot call the same strategy and sizing functions.
 | `PRIVATE_KEY` is read only in `bot/chain.py`, from the environment, and is never logged. Errors are scrubbed of the key and the RPC URL (which often carries an API key). | `chain.py`; a test fails if any other module mentions it |
 | `DRY_RUN` defaults to true. Dry run uses a simulated wallet and sends nothing. `ChainClient.swap` also refuses to run while `DRY_RUN` is true. | `config.py`, `run.py`, `chain.py` |
 | `MAX_TRADE_USDC`, `MAX_SLIPPAGE_BPS` and `GAS_RESERVE_SOL` are hard limits. They are enforced when sizing and again in `chain.py`. | `config.py`, `strategy.py`, `chain.py` |
-| The dashboard never touches the key and imports no trading code. It writes only two state keys, both validated: the pause flag (STOP/RESUME) and the candle timeframe (1m to 1h switch; the bot picks it up next cycle). The timeframe switch is a deliberate exception to the original "pause flag only" rule. Everything else is read over a read-only connection. | `dashboard/app.py`, tested |
+| The dashboard never touches the key and imports no trading code. It writes only three state keys, all validated: the pause flag (STOP/RESUME), the candle timeframe (1m to 1h switch) and the RISKY switch; the bot picks them up next cycle. The timeframe and RISKY switches are deliberate exceptions to the original "pause flag only" rule. Everything else is read over a read-only connection. | `dashboard/app.py`, tested |
 | The pause flag is checked at the top of every cycle and again right before a swap. A paused bot keeps logging balances. | `run.py` |
 | RPC and API errors are logged, then the loop sleeps and continues. A failed swap is retried at most once per cycle, and only if it definitely did not execute. | `run.py`, `chain.py` |
-| Equity floor: equity = USDC + wSOL at the latest price, excluding native SOL. It is checked at the start of every cycle and right after every trade, in dry run too. Below `MIN_EQUITY_USD` the bot sets a persistent `halted` flag and stops trading. It does not sell the open position. | `run.py` |
+| Equity floor: equity = USDC + every position at its latest price (a held coin with no price this cycle uses its last known mark), excluding native SOL. It is checked at the start of every cycle and right after every trade, in dry run too. Below `MIN_EQUITY_USD` the bot sets a persistent `halted` flag and stops trading. It does not sell the open position. | `run.py` |
 
 A halt survives restarts. Only `python -m bot.reset_halt` clears it; the dashboard cannot. If equity is still below the floor, the bot halts again on the next cycle.
 
@@ -138,9 +187,12 @@ The bot also sets the same halt if a transaction was sent but its outcome is sti
 
 ### Database (`bot/db.py`)
 
-- `trades(timestamp, side, amount_in, amount_out, price, tx_hash, simulated)` plus an `id`. A buy spends USDC for wSOL; a sell spends wSOL for USDC. `price` is USDC per SOL, and `tx_hash` is the Solana signature.
-- `balances(timestamp, usdc, sol, wsol)` plus `id`, `price` (the SOL/USD mark, used for the equity curve) and `simulated`.
-- `state(key, value)`: `paused`, `halted`, `halt_reason`, `dry_run`, `heartbeat`, plus bookkeeping.
+- `trades(timestamp, side, amount_in, amount_out, price, tx_hash, simulated, asset)` plus an `id`. A buy spends USDC for the coin; a sell spends the coin for USDC. `price` is USDC per unit of the coin, and `tx_hash` is the Solana signature.
+- `balances(timestamp, usdc, sol, wsol)` plus `id`, `price` (the SOL/USD mark), `holdings` (JSON of every other coin's quantity and price, used for the equity curve) and `simulated`.
+- `snipes(...)`: the simulated sniper's positions, with its own bankroll.
+- `state(key, value)`: `paused`, `halted`, `halt_reason`, `dry_run`, `heartbeat`, `risky`, plus per-coin bookkeeping.
+
+Older databases are migrated in place when the bot starts.
 
 The dry-run wallet is `SIM_START_*` replayed through the simulated trades, using the same 0.3% fee and 0.1% slippage as the backtest.
 
@@ -164,7 +216,24 @@ How to read it:
 - DCA at $1/day spends the $20 in 20 days, so it behaves like a delayed buy & hold.
 - This is one year of one asset, not a forecast. Use `--days N` to look at other windows.
 
+### Multi-coin backtest (`python -m bot.portfolio_backtest`)
+
+45 days of Binance 5m candles for SOL, BTC, ETH, BNB, XRP, DOGE and AVAX, starting with $20, $5 per position, up to 3 positions, shared cash. The first 30 days were for choosing settings and the last 15 for checking them. This is a short window, so read it as a warning about fees rather than proof of an edge. Equal-weight buy and hold made +12% then -5%.
+
+| Timeframe | Cost per side | Best SMA trend result (train / test) |
+| --- | --- | --- |
+| 5m | 0.3% fee + 0.1% slippage | -58% / -28% |
+| 5m | 0.1% | -32% / -15% |
+| 15m | 0.1% | -10% / -10% (-6% / -2% with the BTC filter) |
+| 1h | 0.1% | -0.3% / -10% (+3.9% / flat with the BTC filter) |
+
+- **Fast trading loses to fees.** The faster the moving averages and the shorter the candles, the worse it did, in every variant. The 3/8 setting lost 95% on 5m.
+- **What helped most** was refusing to open positions while BTC was below its long average (`REGIME_LEN`): at 1h it turned -10% into "stayed flat" on the weak last 15 days. Trailing stops, hard stops and re-entry waits changed little.
+- The settings in `.env.example` (1h, 9/21 trend, 10 bps edge, confirmation, 3 ATR stop, BTC filter over 400 candles) are those results. They are the least-bad found, **not a proven edge**, and in a sideways or falling market they simply sit out. Choosing a faster timeframe on the dashboard means accepting the losses above.
+
 ## Before going live
+
+Neither strategy has a proven edge (see the backtests above). The checklist below makes live trading *safe* to try with money you can lose; it does not make it profitable.
 
 Dry run is implemented and tested, but it has not yet run for several days, and no real transaction has been sent. To finish:
 
@@ -176,47 +245,24 @@ Dry run is implemented and tested, but it has not yet run for several days, and 
 6. Set `DRY_RUN=false`, then do one swap under $2 by hand with `python -m bot.chain swap buy 1.0`. Check it on Solscan, then sell back with `python -m bot.chain swap sell <wsol_amount>`. The first buy creates the wSOL account, which costs about 0.002 SOL in refundable rent.
 7. Only then start `python -m bot.run` with `DRY_RUN=false`.
 
-## Running on Google Cloud
-
-Not yet run against a real VM (Google Cloud requires a billing account). `deploy/deploy.py` puts everything on one e2-micro VM (Debian 12, in the free tier in `us-central1`). Run it from Windows after installing the Google Cloud CLI and running `gcloud init` with billing enabled on the project:
-
-```powershell
-python deploy/deploy.py up        # create the VM, upload code + .env, install, start services, print the public URL
-python deploy/deploy.py push      # after changing code or .env: re-upload and restart
-python deploy/deploy.py url       # current public URL
-python deploy/deploy.py status    # are the services running?
-python deploy/deploy.py logs      # last bot log lines
-python deploy/deploy.py private   # full dashboard (with pause) at http://localhost:8501 over SSH
-```
-
-The VM runs four systemd services, each restarting on failure and at boot:
-
-- **The bot.**
-- **A private dashboard** on `127.0.0.1:8501`, reachable only through `deploy.py private`.
-- **A public read-only dashboard** with `DASHBOARD_PUBLIC=true`: no pause control, never writes, and no transaction links, since those would reveal the wallet.
-- **A Cloudflare quick tunnel** that gives the public dashboard an HTTPS `*.trycloudflare.com` URL with no open ports. That URL changes when the tunnel restarts; a permanent one needs a domain on Cloudflare.
-
-Notes:
-
-- The VM sets `CANDLE_EXCHANGE=kraken`, because Binance blocks US IP addresses.
-- `.env` is uploaded with permissions `600`.
-- **Cost:** the e2-micro and its 30 GB standard disk are in the free tier. The VM's external IPv4 address and any network traffic beyond the free allowance may be billed (a few dollars a month at most), so check the billing page after the first week.
-
 ## Layout
 
 ```
 bot/
   config.py      settings and hard limits (.env)
   db.py          SQLite schema and helpers
+  assets.py      the coins: mints, decimals, exchange markets, core vs risky
   data.py        candle download and CSV cache
-  strategy.py    DCA and SMA crossover, trade sizing (pure functions)
-  backtest.py    comparison table
+  strategy.py    moving-average signal, stops, BTC filter, trade sizing (pure functions)
+  ml.py          the AI: features, training, walk-forward test, live model management
+  backtest.py    single-coin comparison table
+  portfolio_backtest.py  multi-coin backtest of the live strategy
+  sniper.py      simulated new-token sniper (dry run only)
   chain.py       balances, Jupiter quotes and swaps (the only place the key is read)
   run.py         the trading loop (with a dry-run simulator)
   reset_halt.py  python -m bot.reset_halt
 dashboard/app.py Streamlit dashboard
 tests/           pytest suite
 launch.py        one-command start: venv, checks, bot + dashboard, supervision
-deploy/          Google Cloud VM deployment (untested on a real VM)
 data/            gitignored: SQLite file, candle cache, logs
 ```

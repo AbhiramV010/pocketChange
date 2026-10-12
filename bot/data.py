@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,6 +26,7 @@ MAX_PAGES = 200
 FALLBACK_EXCHANGES = ("binance", "bybit", "okx", "kraken")
 
 _exchanges: dict[str, ccxt.Exchange] = {}
+FETCH_LOCK = threading.Lock()  # the trading loop and the AI's background retraining share one ccxt client
 
 
 class DataError(RuntimeError):
@@ -50,7 +52,7 @@ def to_frame(rows: list[list[float]]) -> pd.DataFrame:
 
 
 def download(
-    since: datetime, exchange_id: str, until: datetime | None = None, timeframe: str = TIMEFRAME
+    since: datetime, exchange_id: str, until: datetime | None = None, timeframe: str = TIMEFRAME, symbol: str = SYMBOL
 ) -> pd.DataFrame:
     ex = _exchange(exchange_id)
     until_ms = int((until or datetime.now(timezone.utc)).timestamp() * 1000)
@@ -58,7 +60,8 @@ def download(
     step = int(candle_delta(timeframe).total_seconds() * 1000)
     rows: list[list[float]] = []
     for _ in range(MAX_PAGES):
-        page = ex.fetch_ohlcv(SYMBOL, timeframe, since=cursor, limit=PAGE_LIMIT)
+        with FETCH_LOCK:
+            page = ex.fetch_ohlcv(symbol, timeframe, since=cursor, limit=PAGE_LIMIT)
         if not page:
             break
         rows.extend(page)
@@ -71,11 +74,13 @@ def download(
     return to_frame(rows)
 
 
-def _download_with_fallback(since: datetime, preferred: str | None, timeframe: str = TIMEFRAME) -> pd.DataFrame:
+def _download_with_fallback(
+    since: datetime, preferred: str | None, timeframe: str = TIMEFRAME, symbol: str = SYMBOL
+) -> pd.DataFrame:
     errors = []
     for exchange_id in _exchange_order(preferred):
         try:
-            df = download(since, exchange_id, timeframe=timeframe)
+            df = download(since, exchange_id, timeframe=timeframe, symbol=symbol)
             log.debug("candles: %d rows from %s", len(df), exchange_id)
             return df
         except Exception as exc:  # network, rate limit, geo-block, unknown market
@@ -84,9 +89,16 @@ def _download_with_fallback(since: datetime, preferred: str | None, timeframe: s
     raise DataError("all candle sources failed: " + "; ".join(errors))
 
 
-def fetch_recent(limit: int = 120, exchange_id: str | None = None, timeframe: str = TIMEFRAME) -> pd.DataFrame:
+def fetch_recent(
+    limit: int = 120, exchange_id: str | None = None, timeframe: str = TIMEFRAME, symbol: str = SYMBOL
+) -> pd.DataFrame:
     since = datetime.now(timezone.utc) - candle_delta(timeframe) * (limit + 1)
-    return _download_with_fallback(since, exchange_id, timeframe).tail(limit)
+    return _download_with_fallback(since, exchange_id, timeframe, symbol).tail(limit)
+
+
+def fetch_history(symbol: str, days: int, timeframe: str, exchange_id: str | None = None) -> pd.DataFrame:
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    return closed_only(_download_with_fallback(since, exchange_id, timeframe, symbol), timeframe=timeframe)
 
 
 def closed_only(df: pd.DataFrame, now: datetime | None = None, timeframe: str = TIMEFRAME) -> pd.DataFrame:

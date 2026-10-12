@@ -182,7 +182,7 @@ class FailingBroker:
     def balances(self):
         return self.inner.balances()
 
-    def swap(self, side, amount_in, ref_price):
+    def swap(self, side, amount_in, ref_price, asset="SOL"):
         self.swaps += 1
         raise self.error
 
