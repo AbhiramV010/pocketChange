@@ -24,6 +24,7 @@ from bot.strategy import Params, Signal, dca_signal, decide, momentum, regime_ok
 
 log = logging.getLogger("bot")
 
+ROUND_TRIP_COST = 2 * (FEE_RATE + SLIPPAGE_RATE)  # buy and sell, each with fee and slippage
 MAX_SWAP_RETRIES = 1  # hard rule: a failed swap is retried at most once per cycle
 MAX_ATTEMPT_CYCLES = 3  # cycles that may try the same signal before giving up on it
 REGIME_ASSET = "BTC"  # the market filter looks at BTC
@@ -334,7 +335,11 @@ def _plan_ml(
         log.info("%s: not enough clean history for the AI yet", name)
         return None
     ctx.scores[asset] = prob
-    params = ml.MLParams(bundle.params.horizon, bundle.params.target_pct, cfg.ml_enter, cfg.ml_exit)
+    db.record_prediction(conn, asset, timeframe, closed.index[-1].isoformat(), prob, price,
+                         bundle.params.horizon, bundle.params.target_pct)
+    _grade_predictions(conn, asset, timeframe, closed)
+    enter = _learned_enter(conn, timeframe, cfg.ml_enter) if cfg.ml_adapt else cfg.ml_enter
+    params = ml.MLParams(bundle.params.horizon, bundle.params.target_pct, enter, cfg.ml_exit)
     _, entry_price, entry_time = db.open_position(conn, asset, cfg.dry_run)
     holding = balances.qty(asset) * price >= MIN_TRADE_USDC
     freq = pd.Timedelta(data.candle_delta(timeframe))
@@ -351,6 +356,30 @@ def _plan_ml(
     if signal is Signal.HOLD:
         return None
     return Plan(asset, signal, price, closed, prob)
+
+
+def _grade_predictions(conn, asset: str, timeframe: str, closed: pd.DataFrame) -> None:
+    """Score each open prediction once its horizon has closed: did the coin gain more than the target?"""
+    closes = closed["close"]
+    for row in db.open_predictions(conn, asset, timeframe):
+        candle = pd.Timestamp(row["candle"])
+        if candle not in closes.index:
+            continue
+        pos = closes.index.get_loc(candle) + row["horizon"]
+        if pos >= len(closes):
+            continue  # horizon not over yet
+        gross = closes.iloc[pos] / row["price0"] - 1
+        net = (1 + gross) * (1 - ROUND_TRIP_COST) - 1  # what a real buy-then-sell would have kept after fees and slippage
+        db.resolve_prediction(conn, row["id"], float(net), bool(gross > row["target_pct"] / 100))
+
+
+def _learned_enter(conn, timeframe: str, default: float) -> float:
+    """The buy threshold the AI has learned from its own graded predictions (reward-based)."""
+    rows = db.resolved_predictions(conn, timeframe)
+    resolved = [(r["p"], r["fwd_return"]) for r in rows]
+    enter = ml.best_threshold(resolved, default=default)
+    db.set_ml_learn(conn, {"timeframe": timeframe, "enter": enter, "graded": len(resolved)})
+    return enter
 
 
 def _open_positions(balances: Balances, prices: dict[str, float]) -> int:

@@ -317,3 +317,29 @@ def test_the_missing_model_notice_is_logged_once_per_cycle(conn, caplog):
     with caplog.at_level("INFO", logger="bot"):
         rig.cycle()
     assert sum("no trained model" in r.message for r in caplog.records) == 1
+
+
+def test_best_threshold_chases_reward_not_hit_rate():
+    # 0.9-confidence calls: 50% hit but +3% average. 0.6-confidence: 60% hit but only +0.2% average.
+    big = [(0.9, 0.06), (0.9, -0.00)] * 25
+    small = [(0.6, 0.004), (0.6, -0.00)] * 25
+    # any threshold above 0.6 keeps only the 50 high-reward picks; the low-reward 0.6 band is avoided
+    assert ml.best_threshold(big + small, default=0.6) > 0.6
+
+
+def test_best_threshold_falls_back_without_enough_data():
+    assert ml.best_threshold([(0.9, 0.5)] * 5, default=0.6) == 0.6
+
+
+def test_predictions_are_graded_once_the_horizon_has_passed(conn):
+    from bot import db as dbm
+    from bot.run import _grade_predictions
+
+    idx = pd.date_range("2026-01-01", periods=12, freq="1h", tz="UTC")
+    closed = pd.DataFrame({"close": np.linspace(100, 110, 12)}, index=idx)
+    dbm.record_prediction(conn, "BTC", "1h", idx[0].isoformat(), 0.7, 100.0, 6, 0.4)
+    dbm.record_prediction(conn, "BTC", "1h", idx[10].isoformat(), 0.7, 100.0, 6, 0.4)  # horizon not over
+    _grade_predictions(conn, "BTC", "1h", closed)
+    rows = dbm.resolved_predictions(conn, "1h")
+    assert len(rows) == 1 and rows[0]["candle"] == idx[0].isoformat()
+    assert rows[0]["win"] == 1 and rows[0]["fwd_return"] == pytest.approx((1 + closed["close"].iloc[6] / 100 - 1) * (1 - 2 * (0.003 + 0.001)) - 1)

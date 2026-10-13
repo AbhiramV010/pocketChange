@@ -37,6 +37,21 @@ CREATE TABLE IF NOT EXISTS state (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS ai_predictions (  -- every AI score, graded once its horizon has passed
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset      TEXT    NOT NULL,
+    timeframe  TEXT    NOT NULL,
+    candle     TEXT    NOT NULL,   -- timestamp of the last closed candle the AI saw
+    p          REAL    NOT NULL,
+    price0     REAL    NOT NULL,
+    horizon    INTEGER NOT NULL,
+    target_pct REAL    NOT NULL,
+    resolved   INTEGER NOT NULL DEFAULT 0,
+    fwd_return REAL,
+    win        INTEGER,
+    UNIQUE (asset, timeframe, candle)
+);
+CREATE INDEX IF NOT EXISTS idx_ai_open ON ai_predictions (timeframe, resolved);
 CREATE TABLE IF NOT EXISTS snipes (   -- simulated new-token sniper: a sandbox that never touches the wallet
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     mint          TEXT    NOT NULL UNIQUE,
@@ -73,6 +88,7 @@ ATTEMPT_SIGNAL = "attempt_signal"
 ATTEMPT_COUNT = "attempt_count"
 RISKY = "risky"
 ML_SCORES = "ml_scores"  # latest P(win) per coin, written by the bot for the dashboard
+ML_LEARN = "ml_learn"  # what the AI has learned from its own predictions
 ML_INFO = "ml_info"  # which model is live: when trained, out-of-sample AUC, thresholds
 
 
@@ -169,6 +185,41 @@ def is_risky(conn: sqlite3.Connection, default: bool = False) -> bool:
 
 def set_risky(conn: sqlite3.Connection, risky: bool) -> None:
     set_state(conn, RISKY, "1" if risky else "0")
+
+
+def record_prediction(
+    conn: sqlite3.Connection, asset: str, timeframe: str, candle: str, p: float, price0: float, horizon: int, target_pct: float
+) -> None:
+    with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO ai_predictions (asset, timeframe, candle, p, price0, horizon, target_pct) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (asset, timeframe, candle, p, price0, horizon, target_pct),
+        )
+
+
+def open_predictions(conn: sqlite3.Connection, asset: str, timeframe: str) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM ai_predictions WHERE asset = ? AND timeframe = ? AND resolved = 0 ORDER BY id", (asset, timeframe)
+    ).fetchall()
+
+
+def resolve_prediction(conn: sqlite3.Connection, prediction_id: int, fwd_return: float, win: bool) -> None:
+    with conn:
+        conn.execute(
+            "UPDATE ai_predictions SET resolved = 1, fwd_return = ?, win = ? WHERE id = ?",
+            (fwd_return, int(win), prediction_id),
+        )
+
+
+def resolved_predictions(conn: sqlite3.Connection, timeframe: str, limit: int = 5000) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM ai_predictions WHERE timeframe = ? AND resolved = 1 ORDER BY id DESC LIMIT ?", (timeframe, limit)
+    ).fetchall()
+
+
+def set_ml_learn(conn: sqlite3.Connection, info: Mapping[str, object]) -> None:
+    set_state(conn, ML_LEARN, json.dumps(info))
 
 
 def set_ml(conn: sqlite3.Connection, scores: Mapping[str, float], info: Mapping[str, object] | None) -> None:

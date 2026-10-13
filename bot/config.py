@@ -144,6 +144,7 @@ class Settings:
     ml_exit: float = 0.45  # sell when it falls to this or below
     ml_retrain_hours: float = 24.0  # retrain on fresh candles this often
     ml_train_days: int = 400  # history used for training
+    ml_adapt: bool = True  # learn the buy threshold from the AI's own graded predictions (reward-based)
     db_path: Path = DATA_DIR / "pocketchange.db"
     candles_path: Path = DATA_DIR / ("candles.csv" if TIMEFRAME == "1h" else f"candles_{TIMEFRAME}.csv")
     log_path: Path = DATA_DIR / "bot.log"
@@ -248,6 +249,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         ml_exit=_number(env, "ML_EXIT", defaults.ml_exit),
         ml_retrain_hours=_number(env, "ML_RETRAIN_HOURS", defaults.ml_retrain_hours),
         ml_train_days=_number(env, "ML_TRAIN_DAYS", defaults.ml_train_days, int),
+        ml_adapt=_bool(env, "ML_ADAPT", True),
     )
 
 

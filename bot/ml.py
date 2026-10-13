@@ -323,3 +323,25 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# --- learning from its own predictions -------------------------------------------------------------------------
+
+ADAPT_GRID = (0.5, 0.52, 0.55, 0.58, 0.6, 0.62, 0.65, 0.7, 0.75)
+ADAPT_MIN_SAMPLES = 40  # predictions at or above a threshold needed before its average return is trusted
+
+
+def best_threshold(resolved: list[tuple[float, float]], default: float) -> float:
+    """Pick the buy threshold whose predictions earned the highest average forward return.
+
+    `resolved` is (p, forward return) for graded predictions. Reward, not hit rate: a threshold that wins
+    often but small loses to one that wins less often but bigger. Falls back to `default` until there is enough data."""
+    best, best_mean = default, None
+    for thr in ADAPT_GRID:
+        picked = [fwd for p, fwd in resolved if p >= thr]
+        if len(picked) < ADAPT_MIN_SAMPLES:
+            continue
+        mean = sum(picked) / len(picked)
+        if best_mean is None or mean > best_mean:
+            best, best_mean = thr, mean
+    return best
