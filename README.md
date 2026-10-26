@@ -12,6 +12,17 @@ Sets up `.venv` and `.env` (from `.env.example`), checks the price feed, starts 
 
 By hand: `python -m bot.data` (candles), `bot.backtest`, `bot.run [--once]`, `streamlit run dashboard/app.py`, `python -m pytest`. Also `bot.reset_halt` (only way to clear a halt), `bot.chain new-wallet|check|swap buy 1.0`, `bot.ml train|eval`.
 
+## Run on a VPS (Linux, always on)
+
+On a fresh Ubuntu 24.04 VM (Oracle Cloud Always Free works: `VM.Standard.A1.Flex` or `VM.Standard.E2.1.Micro`):
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/AbhiramV010/pocketChange/main/deploy/setup-vps.sh
+sudo bash setup-vps.sh --tunnel   # --public for an anonymous link, omit both for no tunnel
+```
+
+Installs into `/opt/pocketchange`, runs `launch.py` as the `pocketchange.service` systemd unit (restarts on crash and reboot), adds swap on machines under 2 GB, and hosts the dashboard through a dev tunnel (`pocketchange-tunnel.service`; sign in with the device code it prints). Re-run to update. Logs: `journalctl -u pocketchange -f`. Edit `/opt/pocketchange/.env`, then `sudo systemctl restart pocketchange`.
+
 ## Config (`.env`)
 
 `DRY_RUN` (default `true`), `PRIVATE_KEY` (live only), `MAX_TRADE_USDC` (5), `MAX_SLIPPAGE_BPS` (100), `MIN_EQUITY_USD` (15; bot halts below it), `GAS_RESERVE_SOL` (0.01), `STRATEGY` (`sma`/`ml`/`dca`), `ASSETS`, `RISKY_ASSETS`, `MAX_POSITIONS`, `TIMEFRAME`, `SMA_FAST`/`SMA_SLOW`, `REGIME_LEN`. All options are in `.env.example` and `bot/config.py`.
@@ -38,4 +49,4 @@ By hand: `python -m bot.data` (candles), `bot.backtest`, `bot.run [--once]`, `st
 
 ## Layout
 
-`bot/` (config, db, assets, data, strategy, ml, backtest, sniper, chain, run), `dashboard/app.py`, `tests/`, `launch.py`, `data/` (gitignored).
+`bot/` (config, db, assets, data, strategy, ml, backtest, sniper, chain, run), `dashboard/app.py`, `tests/`, `launch.py`, `deploy/setup-vps.sh`, `data/` (gitignored).
