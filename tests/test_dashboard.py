@@ -67,6 +67,19 @@ def test_status_bar_is_gone(app):
     assert not any("DRY RUN" in m.value or "Bot alive" in m.value for m in at.markdown)
     assert len(at.get("divider")) >= 2
 
+def test_says_why_nothing_is_bought_while_the_btc_filter_is_off(app):
+    seed(app)
+    conn = db.connect(app)
+    db.set_state(conn, db.RISK_OFF, "BTC 80,262 is below its 400-candle average 81,861")
+    at = run_app()
+    assert any("Not opening new positions: BTC 80,262 is below" in i.value for i in at.info)
+    db.set_state(conn, db.RISK_OFF, "")
+    assert not run_app().info
+    db.set_state(conn, db.RISK_OFF, "BTC 80,262 is below its 400-candle average 81,861")
+    db.set_paused(conn, True)
+    assert not run_app().info  # paused has its own control; one message at a time
+
+
 def test_halted_shows_red_banner_and_cannot_be_cleared(app):
     seed(app, halted=True)
     at = run_app()

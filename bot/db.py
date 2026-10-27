@@ -90,6 +90,7 @@ RISKY = "risky"
 ML_SCORES = "ml_scores"  # latest P(win) per coin, written by the bot for the dashboard
 ML_LEARN = "ml_learn"  # what the AI has learned from its own predictions
 ML_INFO = "ml_info"  # which model is live: when trained, out-of-sample AUC, thresholds
+RISK_OFF = "risk_off"  # why the BTC filter blocks new positions this cycle; empty while it allows them
 
 
 class Balances(NamedTuple):

@@ -39,6 +39,18 @@ def test_confirm_needs_a_rising_slow_average_and_price_above_it():
     assert sma_signal(bounce, strict) is Signal.HOLD  # the slow average is still falling
 
 
+def test_cross_mode_buys_once_when_fast_crosses_the_edge_line():
+    """Fast rarely jumps from below slow to edge_bps above it in one candle. Requiring that on the cross candle
+    skipped almost every crossover, so the bot never bought on 1h or shorter. It buys when fast crosses the line."""
+    closes = np.concatenate([np.linspace(110, 100, 60), np.linspace(100, 101.5, 40)])  # a slow turn up
+    p = Params(fast=5, slow=20, entry="cross", edge_bps=10.0, confirm=False)
+    signals = [sma_signal(closes[: i + 1], p) for i in range(25, len(closes))]
+    assert signals.count(Signal.BUY) == 1 and Signal.SELL not in signals
+    plain = Params(fast=5, slow=20, entry="cross", edge_bps=0.0, confirm=False)
+    first = [sma_signal(closes[: i + 1], plain) for i in range(25, len(closes))].index(Signal.BUY)
+    assert signals.index(Signal.BUY) > first  # the edge line is crossed a few candles after slow
+
+
 def test_atr_and_hard_stop():
     f = frame(rising(30), spread=1.0)
     assert atr(f["high"].to_numpy(), f["low"].to_numpy(), f["close"].to_numpy()) == pytest.approx(2.0)

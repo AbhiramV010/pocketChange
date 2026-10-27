@@ -19,7 +19,7 @@ load_dotenv(ROOT / ".env", override=False)
 SYMBOL = "SOL/USDC"
 TIMEFRAMES = ("1m", "5m", "15m", "30m", "1h", "4h")
 # Defaults are the settings that held up best in the backtests (README "Results"): 4h candles, the 20/50
-# crossover with the edge and trend filters, ATR and hard stops, the BTC market filter and 1% risk sizing.
+# crossover with the trend filter, ATR and hard stops, the BTC market filter and 1% risk sizing.
 # Set a refinement to 0 (or TREND_CONFIRM=false) to switch it off.
 TIMEFRAME = (os.environ.get("TIMEFRAME") or "4h").strip().lower()  # candle size for strategies and backtests
 SMA_FAST = int(os.environ.get("SMA_FAST") or 20)
@@ -28,7 +28,7 @@ SMA_SLOW = int(os.environ.get("SMA_SLOW") or 50)
 # trend: be long whenever fast > slow, flat whenever fast < slow (aggressive, enters right away).
 ENTRY_MODES = ("cross", "trend")
 ENTRY = (os.environ.get("ENTRY") or "cross").strip().lower()
-EDGE_BPS = float(os.environ.get("EDGE_BPS") or 10)  # fast must beat slow by this much to enter
+EDGE_BPS = float(os.environ.get("EDGE_BPS") or 0)  # enter only once fast is this far above slow (cross: crosses that line)
 TREND_CONFIRM = (os.environ.get("TREND_CONFIRM") or "true").strip().lower() in ("1", "true", "yes", "on")
 STOP_ATR = float(os.environ.get("STOP_ATR") or 3)  # trailing stop this many ATRs below the highest close since entry
 HARD_STOP_PCT = float(os.environ.get("HARD_STOP_PCT") or 10)  # also exit if price falls this % below entry

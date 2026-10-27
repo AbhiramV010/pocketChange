@@ -14,7 +14,9 @@ By hand: `python -m bot.data` (candles), `bot.backtest`, `bot.portfolio_backtest
 
 ## Config (`.env`)
 
-`DRY_RUN` (default `true`), `PRIVATE_KEY` (live only), `MAX_TRADE_USDC` (5), `MAX_SLIPPAGE_BPS` (100), `MIN_EQUITY_USD` (15; bot halts below it), `GAS_RESERVE_SOL` (0.01), `STRATEGY` (`sma`/`ml`/`dca`), `ASSETS`, `RISKY_ASSETS`, `MAX_POSITIONS`, `TIMEFRAME` (4h). Strategy defaults are the best backtested settings: `SMA_FAST`/`SMA_SLOW` 20/50, `ENTRY=cross`, `EDGE_BPS=10`, `TREND_CONFIRM=true`, `STOP_ATR=3`, `HARD_STOP_PCT=10`, `REGIME_LEN=400` (BTC filter), `RISK_PCT=1` (size each buy so a stop-out costs ~1% of equity). All options are in `.env.example` and `bot/config.py`.
+`DRY_RUN` (default `true`), `PRIVATE_KEY` (live only), `MAX_TRADE_USDC` (5), `MAX_SLIPPAGE_BPS` (100), `MIN_EQUITY_USD` (15; bot halts below it), `GAS_RESERVE_SOL` (0.01), `STRATEGY` (`sma`/`ml`/`dca`), `ASSETS`, `RISKY_ASSETS`, `MAX_POSITIONS`, `TIMEFRAME` (4h). Strategy defaults are the best backtested settings: `SMA_FAST`/`SMA_SLOW` 20/50, `ENTRY=cross`, `EDGE_BPS=0`, `TREND_CONFIRM=true`, `STOP_ATR=3`, `HARD_STOP_PCT=10`, `REGIME_LEN=400` (BTC filter), `RISK_PCT=1` (size each buy so a stop-out costs ~1% of equity). All options are in `.env.example` and `bot/config.py`. Values in your `.env` override these defaults, so an `.env` copied from an older `.env.example` keeps the old settings until you edit it.
+
+While BTC is below its `REGIME_LEN`-candle average the bot opens no new positions (exits and stops still run). In a falling market that can mean days or weeks without a trade; the dashboard shows the reason while it lasts.
 
 ## Backtests
 
@@ -32,25 +34,30 @@ The AI's labels are net of the 0.8% round trip: a "win" is a trade that keeps `M
 
 ## Results (Oct 2026; past results, not a promise)
 
-SOL, BTC, ETH, BNB, XRP, DOGE from Binance; $20 start, $5 cap per trade, up to 6 positions, 0.4% cost per side.
+SOL, BTC, ETH, BNB, XRP, DOGE from OKX USDT pairs (a close proxy for the USDC prices the bot trades); $20 start, $5 cap per trade, up to 6 positions, 0.4% cost per side.
 
 | Test | Strategy | Return | Max DD | Sharpe | Trades |
 |---|---|---|---|---|---|
-| 4h, Dec 2023 – Oct 2026 | Buy & hold (equal weight) | +13% | 64% | 0.37 | 6 |
-| | Default rules | **+56%** | **16%** | **1.26** | 112 |
-| | Default rules, costs doubled | +44% | 20% | 1.05 | 112 |
-| 4h, first half / second half | Buy & hold | +55% / −24% | 49% / 65% | | |
-| | Default rules (best first-half Sharpe of the grid) | +63% / −3% | 11% / 7% | 2.04 / −0.29 | 100 |
-| 4h AI, out of sample, Apr 2024 – Oct 2026 | Buy & hold | +15% | 64% | 0.40 | 6 |
-| | AI, `ML_ENTER` 0.55 / 0.6, default stops and filters | +11.5% / +8.6% | 8% / 6% | 0.67 / 0.59 | 338 / 174 |
-| 1h, Oct 2024 – Oct 2026 | Default rules | −3% | 17% | −0.15 | 132 |
-| 15m, Mar – Oct 2026 | Every setting tried | −0.2% to −96% | | | |
+| 4h, Dec 2023 – Oct 2026 | Buy & hold (equal weight) | +81% | 64% | 0.64 | 6 |
+| | Default rules | **+124%** | **21%** | **1.55** | 242 |
+| | Default rules, costs doubled | +99% | 23% | 1.33 | 240 |
+| 4h, first half / second half (split May 2025) | Buy & hold | +166% / −29% | 50% / 64% | | |
+| | Default rules | +136% / +6% | 21% / 10% | 2.44 / 0.38 | 208 |
+| 4h AI, out of sample, Jun 2024 – Oct 2026 | Buy & hold | +9% | 64% | 0.38 | 6 |
+| | Default rules, same period | +94% | 18% | 1.64 | 192 |
+| | AI, `ML_ENTER` 0.55 / 0.6, default stops and filters | −1% / +8% | 11% / 5% | −0.04 / 0.58 | 450 / 222 |
+| 1h, Oct 2024 – Oct 2026 | Buy & hold | +17% | 65% | 0.45 | 6 |
+| | Default rules | −42% | 50% | −1.33 | 635 |
+| | 9/21 trend, the old `.env.example` | −80% | 83% | −2.48 | 1861 |
+| 15m, Mar – Oct 2026 | Buy & hold | +8% | 31% | 0.51 | 6 |
+| | Default rules / 9/21 trend | −61% / −95% | 62% / 95% | | 784 / 1390 |
 
 What this does and does not show:
-- On 4h the rules beat buy & hold with a quarter of its drawdown, and nearby settings (10/30, 2–4 ATR stops, `REGIME_LEN=200`, 3 positions, +AVAX, +memecoins) were positive too. Only 30/80 lost (−2%).
-- The edge is trend following: it made its money in the 2024–25 rally and mostly sat out the 2025–26 decline (−3% while the coins fell 24%). It is long-only, so a long bear market means flat at best.
-- Below 4h, every setting lost after costs; trend mode did worse than cross mode almost everywhere. The dashboard still offers short timeframes, at your own risk.
-- One 2.8-year history, $5 positions, simulated fills. Run the dry run first and fund only what you can lose.
+- On 4h the rules beat buy & hold with a third of its drawdown, and every nearby setting tried was positive: 10/30, 30/80, 2 and 4 ATR stops, `REGIME_LEN=200`, no BTC filter, 3 positions, `EDGE_BPS=10`, no trend confirmation (+48% to +143%).
+- The edge is trend following: it made its money in the 2024–25 rally and stayed slightly positive through the 2025–26 decline (+6% while the coins fell 29%). It is long-only, so a long bear market means flat at best.
+- The AI separates winners from losers only a little (out-of-sample AUC 0.55) and did far worse than the plain rules over the same period.
+- Below 4h every setting lost after costs, and trend mode lost most. The dashboard still offers short timeframes, at your own risk; the bot logs a warning when it starts on one.
+- One 2.9-year history, $5 positions, simulated fills. Run the dry run first and fund only what you can lose.
 
 ## Before going live
 

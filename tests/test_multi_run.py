@@ -104,9 +104,18 @@ def test_regime_filter_blocks_new_entries_until_btc_turns_up(conn):
     m = Market(conn, {"SOL": series(0.0), "BTC": series(-0.003), "ETH": series(0.004)}, params=params)
     m.cycle()
     assert m.broker.swaps == []  # ETH trends up but BTC is below its average: risk-off
+    assert "BTC" in db.get_state(conn, db.RISK_OFF) and "30-candle average" in db.get_state(conn, db.RISK_OFF)
     m.frames["BTC"] = frame(series(0.003))
     m.cycle()
     assert ("buy", "ETH") in m.broker.swaps
+    assert db.get_state(conn, db.RISK_OFF) == ""  # the dashboard notice clears
+
+
+def test_regime_filter_says_when_btc_history_is_too_short(conn):
+    m = Market(conn, {"SOL": series(0.0), "BTC": series(0.003), "ETH": series(0.004)}, params=replace(TREND, regime_len=30))
+    m.frames["BTC"] = m.frames["BTC"].iloc[-21:]  # 20 closed candles and the forming one, as fresh as the others
+    m.cycle()
+    assert m.broker.swaps == [] and "only 20 of the 30 BTC candles" in db.get_state(conn, db.RISK_OFF)
 
 
 def test_regime_never_blocks_an_exit(conn):

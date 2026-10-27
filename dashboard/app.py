@@ -230,6 +230,7 @@ def live_view() -> None:
         latest = db.latest_balance(conn)
         snipes = db.read_snipes(conn)
         ml_scores, ml_info = db.get_ml(conn)
+        risk_off = db.get_state(conn, db.RISK_OFF) or ""
 
     dry_run = settings.dry_run if mode_flag is None else mode_flag == "1"
     # The sniper counts once it has been used (or RISKY is on); until then it is not part of the totals.
@@ -283,6 +284,12 @@ def live_view() -> None:
         "below 4h lost money after costs.",
     )
     st.divider()
+    if risk_off and not (halted or paused):
+        st.info(
+            f"Not opening new positions: {risk_off}. Buys resume when the market filter clears; stops and exits "
+            "still run.",
+            icon=":material/trending_down:",
+        )
 
     trades = trades_all[trades_all["simulated"] == dry_run]
     balances = balances_all[balances_all["simulated"] == dry_run]

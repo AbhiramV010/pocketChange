@@ -29,6 +29,7 @@ MAX_SWAP_RETRIES = 1  # hard rule: a failed swap is retried at most once per cyc
 MAX_ATTEMPT_CYCLES = 3  # cycles that may try the same signal before giving up on it
 MAX_SELL_CHUNKS = 10  # capped swaps one exit may take in a cycle; anything left continues next cycle
 REGIME_ASSET = "BTC"  # the market filter looks at BTC
+PROVEN_TIMEFRAME = "4h"  # the only candle size whose backtests beat fees (README "Results")
 ALREADY_RUNNING_EXIT = 3  # exit code when another bot holds the instance lock
 
 
@@ -171,7 +172,8 @@ def run_cycle(ctx: Context) -> None:
         return
 
     bench = _closed_bench(markets, now, timeframe)
-    risk_on = _risk_on(ctx, markets, bench)
+    risk_on, why_off = _risk_on(ctx, markets, bench)
+    db.set_state(conn, db.RISK_OFF, why_off)  # the dashboard says why nothing new is bought
     equity = portfolio_equity(balances, prices, db.last_marks(conn))
     plans = []
     for asset in assets:
@@ -213,17 +215,25 @@ def _closed_bench(markets: dict[str, tuple[pd.DataFrame, float | None]], now: da
 
 def _risk_on(
     ctx: Context, markets: dict[str, tuple[pd.DataFrame, float | None]], bench: pd.DataFrame | None
-) -> bool:
-    """The BTC filter on closed candles only, as in the backtest."""
+) -> tuple[bool, str]:
+    """The BTC filter on closed candles only, as in the backtest: (open new positions?, why not)."""
     p = ctx.params
     if p.regime_len <= 0:
-        return True
-    if bench is None or bench.empty or markets.get(REGIME_ASSET, (None, None))[1] is None:
-        return False  # cannot judge the market (no or stale BTC feed): do not open new positions
-    ok = regime_ok(bench["close"].to_numpy(float), p)
-    if not ok:
-        log.info("risk-off: %s is below its %d-candle average; no new positions", REGIME_ASSET, p.regime_len)
-    return ok
+        return True, ""
+    closes = None if bench is None else bench["close"].to_numpy(float)
+    if closes is None or not len(closes) or markets.get(REGIME_ASSET, (None, None))[1] is None:
+        why = f"no fresh {REGIME_ASSET} candles to judge the market"  # do not open positions blind
+    elif len(closes) < p.regime_len:
+        why = f"only {len(closes)} of the {p.regime_len} {REGIME_ASSET} candles the market filter needs"
+    elif regime_ok(closes, p):
+        return True, ""
+    else:
+        why = (
+            f"{REGIME_ASSET} {closes[-1]:,.0f} is below its {p.regime_len}-candle average "
+            f"{closes[-p.regime_len:].mean():,.0f}"
+        )
+    log.info("risk-off: %s; no new positions", why)
+    return False, why
 
 
 def _fmt_positions(balances: Balances, prices: dict[str, float]) -> str:
@@ -606,6 +616,12 @@ def main(argv: list[str] | None = None) -> None:
         "AI" if cfg.strategy == "ml" else "SMA", params.fast, params.slow, params.entry, params.edge_bps, params.confirm, params.stop_atr,
         params.hard_stop_pct, params.regime_len, cfg.max_positions,
     )
+    timeframe = db.get_timeframe(conn) or TIMEFRAME
+    if cfg.strategy != "dca" and timeframe != PROVEN_TIMEFRAME:
+        log.warning("trading on %s candles: in backtests every setting below %s lost money after fees (README Results)",
+                    timeframe, PROVEN_TIMEFRAME)
+    if cfg.strategy == "sma" and params.entry == "trend":
+        log.warning("ENTRY=trend lost money in every backtest; ENTRY=cross is the tested default (README Results)")
     if not cfg.dry_run:
         log.warning("LIVE MODE: real transactions will be sent from %s", getattr(broker, "address", "?"))
     if db.is_halted(conn):

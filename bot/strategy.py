@@ -30,7 +30,7 @@ class Params:
     fast: int = SMA_FAST
     slow: int = SMA_SLOW
     entry: str = ENTRY
-    edge_bps: float = EDGE_BPS  # fast must exceed slow by this much to enter
+    edge_bps: float = EDGE_BPS  # fast must exceed slow by this much to enter (cross mode: the line it crosses)
     confirm: bool = TREND_CONFIRM  # also need close > slow SMA and the slow SMA rising
     stop_atr: float = STOP_ATR  # trailing stop, in ATRs below the highest close since entry (0 = off)
     hard_stop_pct: float = HARD_STOP_PCT  # exit if price is this % under the entry price (0 = off)
@@ -57,7 +57,9 @@ def sma_signal(closes: np.ndarray, p: Params) -> Signal:
         if cur_fast < cur_slow:
             return Signal.SELL
         return Signal.BUY if cur_fast > cur_slow * edge and confirmed else Signal.HOLD
-    if prev_fast <= prev_slow and cur_fast > cur_slow * edge and confirmed:
+    # Cross mode buys when fast crosses the edge line, slow * edge. Requiring fast to jump from below slow to above
+    # that line within one candle skipped most crossovers for good: on 1h and shorter it never traded at all.
+    if prev_fast <= prev_slow * edge and cur_fast > cur_slow * edge and confirmed:
         return Signal.BUY
     if prev_fast >= prev_slow and cur_fast < cur_slow:
         return Signal.SELL
