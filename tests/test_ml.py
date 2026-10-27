@@ -11,6 +11,8 @@ from bot.config import load_settings
 from bot.run import Context, SimBroker, run_cycle
 from bot.strategy import Params, Signal
 
+SETUP = "2026-01-01T00:00:00+00:00"  # setup trades predate every candle in these tests
+
 CFG = replace(load_settings({}), ml_horizon=6, ml_target_pct=0.4, ml_enter=0.6, ml_exit=0.45)
 
 
@@ -283,7 +285,7 @@ def test_without_a_model_nothing_trades_and_nothing_breaks(conn):
 
 
 def test_a_stop_loss_overrides_a_confident_ai(conn):
-    db.insert_trade(conn, "buy", db.Fill(5.0, 0.0166, 300.0, None), True, asset="BTC")  # far above today's price
+    db.insert_trade(conn, "buy", db.Fill(5.0, 0.0166, 300.0, None), True, asset="BTC", timestamp=SETUP)  # far above today's price
     rig = Rig(conn, [0.2, 0.9, 0.2])
     rig.ctx.params = Params(fast=9, slow=21, hard_stop_pct=10.0)
     rig.cycle()
@@ -319,16 +321,56 @@ def test_the_missing_model_notice_is_logged_once_per_cycle(conn, caplog):
     assert sum("no trained model" in r.message for r in caplog.records) == 1
 
 
-def test_best_threshold_chases_reward_not_hit_rate():
-    # 0.9-confidence calls: 50% hit but +3% average. 0.6-confidence: 60% hit but only +0.2% average.
-    big = [(0.9, 0.06), (0.9, -0.00)] * 25
-    small = [(0.6, 0.004), (0.6, -0.00)] * 25
-    # any threshold above 0.6 keeps only the 50 high-reward picks; the low-reward 0.6 band is avoided
-    assert ml.best_threshold(big + small, default=0.6) > 0.6
+SIX_HOURS = pd.Timedelta(hours=6)  # horizon 6 on 1h candles
+
+
+def graded(p, returns, every=SIX_HOURS):
+    """Graded calls made `every` apart from the same start, so equal positions share a window."""
+    t0 = pd.Timestamp("2026-01-01", tz="UTC")
+    return [(p, r, t0 + every * i) for i, r in enumerate(returns)]
+
+
+def test_best_threshold_chases_proven_reward_not_hit_rate():
+    big = graded(0.9, [0.08, -0.02] * 30)  # 50% hits, +3% average
+    small = graded(0.6, [-0.01] * 60)  # same windows, a loss every time
+    # any threshold above 0.6 keeps only the high-reward calls; the losing 0.6 band is avoided
+    assert ml.best_threshold(big + small, 0.6, SIX_HOURS) > 0.6
 
 
 def test_best_threshold_falls_back_without_enough_data():
-    assert ml.best_threshold([(0.9, 0.5)] * 5, default=0.6) == 0.6
+    assert ml.best_threshold(graded(0.9, [0.5] * 5), 0.6, SIX_HOURS) == 0.6
+
+
+def test_overlapping_calls_are_not_counted_as_separate_evidence():
+    hourly = graded(0.9, [0.01] * 100, every=pd.Timedelta(hours=1))  # 100 calls, but only 17 six-hour windows
+    assert len(ml.independent(hourly, SIX_HOURS)) == 17
+    assert ml.best_threshold(hourly, 0.6, SIX_HOURS) == 0.6
+
+
+def test_a_noisy_edge_that_could_be_luck_is_not_adopted():
+    rng = np.random.default_rng(3)
+    noisy = graded(0.9, list(0.002 + rng.normal(0, 0.05, 60)))  # tiny mean, big spread: indistinguishable from zero
+    assert ml.best_threshold(noisy, 0.6, SIX_HOURS) == 0.6
+
+
+def test_a_move_that_only_pays_the_fees_is_labelled_a_loss():
+    idx = pd.date_range("2026-01-01", periods=4, freq="1h", tz="UTC")
+    c = pd.DataFrame({"close": [100.0, 100.5, 101.5, 101.5]}, index=idx)
+    y = ml.labels(c, ml.MLParams(horizon=1, target_pct=0.0))
+    assert list(y.iloc[:3]) == [0.0, 1.0, 0.0]  # +0.5% is eaten by the 0.8% round trip; +1% is not
+
+
+def test_ml_decide_keeps_the_stops_without_a_model_and_gates_entries():
+    closes = np.concatenate([np.linspace(100, 130, 40), [110.0]])
+    h, lo = closes + 0.5, closes - 0.5
+    mp, stops = ml.MLParams(horizon=6, enter=0.6, exit=0.45), Params(fast=9, slow=21, hard_stop_pct=10.0)
+    assert ml.ml_decide(None, closes, h, lo, mp, stops, holding=True, entry_price=128.0, bars_held=3) is Signal.SELL
+    assert ml.ml_decide(None, closes, h, lo, mp, stops, holding=True, entry_price=100.0, bars_held=3) is Signal.HOLD
+    assert ml.ml_decide(0.9, closes, h, lo, mp, stops, holding=False) is Signal.BUY
+    assert ml.ml_decide(0.9, closes, h, lo, mp, stops, holding=False, risk_on=False) is Signal.HOLD
+    wait = Params(fast=9, slow=21, reentry_candles=4)
+    assert ml.ml_decide(0.9, closes, h, lo, mp, wait, holding=False, bars_since_sell=2) is Signal.HOLD
+    assert ml.ml_decide(0.5, closes, h, lo, mp, stops, holding=True, entry_price=100.0, exiting=True) is Signal.SELL
 
 
 def test_predictions_are_graded_once_the_horizon_has_passed(conn):

@@ -1,11 +1,12 @@
 """The AI strategy: a gradient-boosted classifier trained on candle history.
 
-For every coin and closed candle it estimates the probability that price will be more than `target_pct` percent
-higher `horizon` candles later (enough to clear trading costs). The bot buys when that probability is high, sells
-when it fades, and keeps every other safety rule (stops, caps, equity floor, STOP button) untouched.
+For every coin and closed candle it estimates the probability that buying now and selling `horizon` candles later
+keeps more than `target_pct` percent after round-trip fees and slippage. The bot buys when that probability is high,
+sells when it fades, and keeps every other safety rule (stops, caps, equity floor, STOP button) untouched.
 
     python -m bot.ml train --days 400 --timeframe 1h     # fit on all history and save the model
     python -m bot.ml eval  --days 400 --timeframe 1h     # walk-forward test on months the model never saw
+    python -m bot.portfolio_backtest --ml                # what those out-of-sample calls would have earned
 """
 from __future__ import annotations
 
@@ -23,8 +24,8 @@ import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import roc_auc_score
 
-from bot.config import DATA_DIR, Settings, candle_freq
-from bot.strategy import Signal
+from bot.config import DATA_DIR, ROUND_TRIP_COST, Settings, candle_freq
+from bot.strategy import Params, Signal, gate_entry, stop_hit
 
 log = logging.getLogger("bot.ml")
 
@@ -32,12 +33,13 @@ MODEL_DIR = DATA_DIR / "models"
 MAX_TRAIN_CANDLES = 25_000  # per coin; keeps training on short timeframes to a few minutes
 MIN_CANDLES = 130  # history a feature row needs (the longest window is BTC's 100-candle average, plus slack)
 BENCH = "BTC"  # market context for every coin
+LABELS = "net-of-costs"  # saved with each model; a model trained on another label definition is retrained
 
 
 @dataclass(frozen=True)
 class MLParams:
     horizon: int = 6  # candles ahead the model looks
-    target_pct: float = 0.4  # "worth it": the move must beat this many percent
+    target_pct: float = 0.4  # "worth it": a round trip must keep this many percent after costs
     enter: float = 0.6  # buy when P(up) is at least this
     exit: float = 0.45  # sell when it falls to this or below
 
@@ -97,20 +99,33 @@ FEATURE_NAMES = list(features(
 ).columns)
 
 
+def net_of_costs(gross: pd.Series | float) -> pd.Series | float:
+    """What a buy-then-sell keeps of a `gross` price move after fees and slippage on both legs."""
+    return (1 + gross) * (1 - ROUND_TRIP_COST) - 1
+
+
+def forward_net(candles: pd.DataFrame, p: MLParams) -> pd.Series:
+    return net_of_costs(candles["close"].shift(-p.horizon) / candles["close"] - 1)
+
+
 def labels(candles: pd.DataFrame, p: MLParams) -> pd.Series:
-    """1 if the close `horizon` candles ahead is more than target_pct above this close. NaN where unknown."""
-    fwd = candles["close"].shift(-p.horizon) / candles["close"] - 1
+    """1 if buying at this close and selling `horizon` closes later keeps more than target_pct after costs.
+
+    A gross move that only covers the fees is a loss, so it is labelled 0. NaN where the future is unknown."""
+    fwd = forward_net(candles, p)
     return (fwd > p.target_pct / 100).where(fwd.notna()).astype(float)
 
 
 def dataset(frames: dict[str, pd.DataFrame], p: MLParams) -> pd.DataFrame:
-    """All coins stacked: feature columns, `y`, `asset`, and the forward return `fwd`."""
+    """All coins stacked: feature columns, `y`, `asset`, the forward return after costs `fwd`, and `t_end`, the
+    time of the candle the label looks at (later than `horizon` candles ahead wherever the exchange has gaps)."""
     bench = frames.get(BENCH)
     parts = []
     for asset, candles in frames.items():
         f = features(candles, bench)
         f["y"] = labels(candles, p)
-        f["fwd"] = candles["close"].shift(-p.horizon) / candles["close"] - 1
+        f["fwd"] = forward_net(candles, p)
+        f["t_end"] = pd.Series(candles.index, index=candles.index).shift(-p.horizon)
         f["asset"] = asset
         parts.append(f)
     return pd.concat(parts)
@@ -163,7 +178,7 @@ def save(bundle: Bundle) -> Path:
     path = model_path(bundle.timeframe)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    joblib.dump({**bundle.__dict__, "params": asdict(bundle.params), "features": FEATURE_NAMES}, tmp)
+    joblib.dump({**bundle.__dict__, "params": asdict(bundle.params), "features": FEATURE_NAMES, "labels": LABELS}, tmp)
     tmp.replace(path)  # atomic: a crash never leaves a half-written model
     return path
 
@@ -174,8 +189,8 @@ def load(timeframe: str) -> Bundle | None:
         return None
     try:
         blob = joblib.load(path)
-        if blob.get("features") != FEATURE_NAMES:
-            log.warning("model %s was trained on different features; retrain it", path.name)
+        if blob.get("features") != FEATURE_NAMES or blob.get("labels") != LABELS:
+            log.warning("model %s was trained on different features or labels; retrain it", path.name)
             return None
         return Bundle(blob["model"], MLParams(**blob["params"]), blob["timeframe"], blob["trained_at"], blob["rows"], blob.get("oos_auc"))
     except Exception as exc:
@@ -202,6 +217,28 @@ def ml_signal(prob: float | None, holding: bool, bars_held: int, p: MLParams) ->
     return Signal.HOLD
 
 
+def ml_decide(
+    prob: float | None,
+    close: np.ndarray,
+    high: np.ndarray,
+    low: np.ndarray,
+    mp: MLParams,
+    p: Params,
+    *,
+    holding: bool,
+    entry_price: float = 0.0,
+    bars_held: int = 0,
+    bars_since_sell: float | None = None,
+    risk_on: bool = True,
+    exiting: bool = False,
+) -> Signal:
+    """The whole AI rule for one asset: the model's call, then the same stops and entry filters as the SMA rule."""
+    if holding and (exiting or stop_hit(high, low, close, entry_price, bars_held, p)):
+        return Signal.SELL
+    signal = ml_signal(prob, holding, bars_held, mp)
+    return signal if holding else gate_entry(signal, p, risk_on=risk_on, bars_since_sell=bars_since_sell)
+
+
 # --- walk-forward test -------------------------------------------------------------------------------------
 
 def walk_forward(
@@ -209,16 +246,16 @@ def walk_forward(
 ) -> tuple[dict[str, pd.Series], dict]:
     """Out-of-sample probabilities: each block is scored by a model trained only on the time before it."""
     rows = dataset(frames, p)
-    step = pd.Timedelta(candle_freq(timeframe))
     start = rows.index.min() + pd.Timedelta(days=min_train_days)
     end = rows.index.max()
     proba = {a: pd.Series(np.nan, index=frames[a].index) for a in frames}
-    auc_parts, cursor = [], start
+    auc_parts, cursor, scored_from = [], start, None
     while cursor < end:
         block_end = cursor + pd.Timedelta(days=test_days)
-        train_rows = rows[rows.index < cursor - step * p.horizon]  # embargo: labels must be fully in the past
+        train_rows = rows[rows["t_end"] < cursor]  # embargo: every training label is settled before the block
         test_rows = rows[(rows.index >= cursor) & (rows.index < block_end)]
         if len(train_rows.dropna(subset=FEATURE_NAMES + ["y"])) > 5000 and len(test_rows):
+            scored_from = scored_from or cursor
             bundle = Bundle(fit(train_rows), p, timeframe, "", 0)
             scores = bundle.proba_series(test_rows)
             for asset in frames:
@@ -233,7 +270,7 @@ def walk_forward(
         "folds": len(auc_parts),
         "auc": sum(n * a for n, a, _ in auc_parts) / total if auc_parts else float("nan"),
         "base_rate": sum(n * r for n, _, r in auc_parts) / total if auc_parts else float("nan"),
-        "start": start,
+        "start": scored_from or start,  # the first block a model actually scored: compare other results from here
     }
     return proba, summary
 
@@ -321,27 +358,41 @@ def main(argv: list[str] | None = None) -> None:
     print(f"trained on {bundle.rows} rows ({len(frames)} coins), out-of-sample AUC {summary['auc']:.3f}; saved {path}")
 
 
-if __name__ == "__main__":
-    main()
-
-
 # --- learning from its own predictions -------------------------------------------------------------------------
 
 ADAPT_GRID = (0.5, 0.52, 0.55, 0.58, 0.6, 0.62, 0.65, 0.7, 0.75)
-ADAPT_MIN_SAMPLES = 40  # predictions at or above a threshold needed before its average return is trusted
+ADAPT_MIN_SAMPLES = 30  # independent windows at or above a threshold needed before it may be chosen
+ADAPT_Z = 2.0  # standard errors the average must clear, so a lucky threshold is not mistaken for an edge
 
 
-def best_threshold(resolved: list[tuple[float, float]], default: float) -> float:
-    """Pick the buy threshold whose predictions earned the highest average forward return.
+def independent(calls: list[tuple[float, float, pd.Timestamp]], spacing: pd.Timedelta) -> list[float]:
+    """One sample per `spacing`-long window: the average forward return of every call made in it.
 
-    `resolved` is (p, forward return) for graded predictions. Reward, not hit rate: a threshold that wins
-    often but small loses to one that wins less often but bigger. Falls back to `default` until there is enough data."""
-    best, best_mean = default, None
+    Calls on neighbouring candles, or on several coins at once, share most of their future, so counting each one
+    would overstate the evidence many times over."""
+    windows: dict[pd.Timestamp, list[float]] = {}
+    for _, fwd, t in calls:
+        windows.setdefault(pd.Timestamp(t).floor(spacing), []).append(fwd)
+    return [float(np.mean(v)) for v in windows.values()]
+
+
+def best_threshold(calls: list[tuple[float, float, pd.Timestamp]], default: float, spacing: pd.Timedelta) -> float:
+    """The buy threshold with the best proven reward on the AI's own graded calls, else `default`.
+
+    `calls` are (p, forward return after costs, candle time). Each threshold is scored on its calls' independent
+    windows by a lower confidence bound (mean minus ADAPT_Z standard errors). It is adopted only if that bound is
+    above zero, i.e. its edge is positive and unlikely to be luck. Reward, not hit rate: a threshold that wins often
+    but small loses to one that wins less often but bigger."""
+    best, best_score = default, 0.0
     for thr in ADAPT_GRID:
-        picked = [fwd for p, fwd in resolved if p >= thr]
+        picked = independent([c for c in calls if c[0] >= thr], spacing)
         if len(picked) < ADAPT_MIN_SAMPLES:
             continue
-        mean = sum(picked) / len(picked)
-        if best_mean is None or mean > best_mean:
-            best, best_mean = thr, mean
+        score = float(np.mean(picked) - ADAPT_Z * np.std(picked, ddof=1) / np.sqrt(len(picked)))
+        if score > best_score:
+            best, best_score = thr, score
     return best
+
+
+if __name__ == "__main__":
+    main()

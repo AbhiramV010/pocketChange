@@ -75,12 +75,38 @@ def test_decide_cuts_a_position_on_a_stop_even_when_the_trend_says_buy():
 
 
 def test_decide_blocks_entries_when_risk_off_and_right_after_an_exit():
-    f = frame(rising(60))
+    f = frame(np.concatenate([np.full(30, 100.0), rising(40) + 0.5]))  # flat, then a clean uptrend
     p = Params(fast=5, slow=20, entry="trend", reentry_candles=6)
     assert decide(f, p, holding=False, timeframe="1h") is Signal.BUY
     assert decide(f, p, holding=False, risk_on=False, timeframe="1h") is Signal.HOLD
     just_sold = f.index[-1] - pd.Timedelta(hours=2)
     assert decide(f, p, holding=False, last_sell_time=just_sold, timeframe="1h") is Signal.HOLD
-    long_ago = f.index[-1] - pd.Timedelta(hours=30)
+    long_ago = f.index[-1] - pd.Timedelta(hours=45)  # sold while flat: the uptrend since is a fresh one
     assert decide(f, p, holding=False, last_sell_time=long_ago, timeframe="1h") is Signal.BUY
     assert decide(f, p, holding=True, risk_on=False, timeframe="1h") is Signal.BUY  # the filter never blocks exits
+
+
+def test_trend_mode_waits_for_the_trend_to_reset_after_a_stop_out():
+    f = frame(rising(120))  # one long uptrend: fast never dips below slow
+    p = Params(fast=5, slow=40, entry="trend")
+    stopped = f.index[-1] - pd.Timedelta(hours=10)  # stopped out ten candles ago, trend still up
+    assert decide(f, p, holding=False, last_sell_time=stopped, timeframe="1h") is Signal.HOLD
+    assert decide(f, p, holding=False, timeframe="1h") is Signal.BUY  # never sold: the trend is a fresh entry
+    long_ago = f.index[-1] - pd.Timedelta(hours=45)  # over `slow` candles ago: a fresh trend by now
+    assert decide(f, p, holding=False, last_sell_time=long_ago, timeframe="1h") is Signal.BUY
+    dip = frame(np.concatenate([rising(50), rising(50)[-1] - np.arange(1, 9) * 2.0, rising(30, step=1.5) + 98]))
+    after_dip = dip.index[-1] - pd.Timedelta(hours=30)  # the trend broke during the dip, then came back
+    assert decide(dip, p, holding=False, last_sell_time=after_dip, timeframe="1h") is Signal.BUY
+    cross = Params(fast=5, slow=40, entry="cross")  # cross mode needs a fresh crossover anyway
+    assert decide(f, cross, holding=False, last_sell_time=stopped, timeframe="1h") is Signal.HOLD
+
+
+def test_reentry_candles_counts_whole_candles_after_the_sell():
+    from bot.strategy import gate_entry
+
+    one = Params(reentry_candles=1)
+    assert gate_entry(Signal.BUY, one, risk_on=True, bars_since_sell=1) is Signal.HOLD  # the sell's own candle
+    assert gate_entry(Signal.BUY, one, risk_on=True, bars_since_sell=2) is Signal.BUY
+    off = Params(reentry_candles=0)
+    assert gate_entry(Signal.BUY, off, risk_on=True, bars_since_sell=1) is Signal.BUY
+    assert gate_entry(Signal.SELL, Params(reentry_candles=9), risk_on=False, bars_since_sell=1) is Signal.SELL

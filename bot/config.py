@@ -18,25 +18,29 @@ load_dotenv(ROOT / ".env", override=False)
 # Market and strategy constants (not env-tunable).
 SYMBOL = "SOL/USDC"
 TIMEFRAMES = ("1m", "5m", "15m", "30m", "1h", "4h")
-TIMEFRAME = (os.environ.get("TIMEFRAME") or "1h").strip().lower()  # candle size for strategies and backtests
+# Defaults are the settings that held up best in the backtests (README "Results"): 4h candles, the 20/50
+# crossover with the edge and trend filters, ATR and hard stops, the BTC market filter and 1% risk sizing.
+# Set a refinement to 0 (or TREND_CONFIRM=false) to switch it off.
+TIMEFRAME = (os.environ.get("TIMEFRAME") or "4h").strip().lower()  # candle size for strategies and backtests
 SMA_FAST = int(os.environ.get("SMA_FAST") or 20)
 SMA_SLOW = int(os.environ.get("SMA_SLOW") or 50)
 # cross: buy/sell only on the candle where the averages cross (patient, few trades).
 # trend: be long whenever fast > slow, flat whenever fast < slow (aggressive, enters right away).
 ENTRY_MODES = ("cross", "trend")
 ENTRY = (os.environ.get("ENTRY") or "cross").strip().lower()
-# Strategy refinements (all default to "off", i.e. the plain crossover):
-EDGE_BPS = float(os.environ.get("EDGE_BPS") or 0)  # fast must beat slow by this much to enter (and trail it to exit)
-TREND_CONFIRM = (os.environ.get("TREND_CONFIRM") or "false").strip().lower() in ("1", "true", "yes", "on")
-STOP_ATR = float(os.environ.get("STOP_ATR") or 0)  # trailing stop this many ATRs below the highest close since entry
-HARD_STOP_PCT = float(os.environ.get("HARD_STOP_PCT") or 0)  # also exit if price falls this % below entry
+EDGE_BPS = float(os.environ.get("EDGE_BPS") or 10)  # fast must beat slow by this much to enter
+TREND_CONFIRM = (os.environ.get("TREND_CONFIRM") or "true").strip().lower() in ("1", "true", "yes", "on")
+STOP_ATR = float(os.environ.get("STOP_ATR") or 3)  # trailing stop this many ATRs below the highest close since entry
+HARD_STOP_PCT = float(os.environ.get("HARD_STOP_PCT") or 10)  # also exit if price falls this % below entry
 REENTRY_CANDLES = int(os.environ.get("REENTRY_CANDLES") or 0)  # wait this many candles after a sell before re-buying
-REGIME_LEN = int(os.environ.get("REGIME_LEN") or 0)  # only open positions while BTC is above its SMA of this length
+REGIME_LEN = int(os.environ.get("REGIME_LEN") or 400)  # only open positions while BTC is above its SMA of this length
+RISK_PCT = float(os.environ.get("RISK_PCT") or 1)  # size buys so a stop-out loses this % of equity (0 = flat size)
 MIN_TRADE_USDC = 1.0  # below this a trade is not worth the fees
 
-# Cost model shared by the backtest and the dry-run simulator.
+# Cost model shared by the backtest, the dry-run simulator and the AI's labels.
 FEE_RATE = 0.003
 SLIPPAGE_RATE = 0.001
+ROUND_TRIP_COST = 2 * (FEE_RATE + SLIPPAGE_RATE)  # buy and sell, each with fee and slippage
 
 STRATEGIES = ("sma", "dca", "ml")
 
@@ -53,9 +57,11 @@ if EDGE_BPS < 0 or STOP_ATR < 0 or not 0 <= HARD_STOP_PCT < 100:
     raise ConfigError("EDGE_BPS and STOP_ATR must be >= 0, HARD_STOP_PCT in [0, 100)")
 if REENTRY_CANDLES < 0 or not 0 <= REGIME_LEN <= 1000:
     raise ConfigError("REENTRY_CANDLES must be >= 0 and REGIME_LEN in [0, 1000]")
+if not 0 <= RISK_PCT <= 10:
+    raise ConfigError("RISK_PCT must be in [0, 10]")
 if TIMEFRAME not in TIMEFRAMES:
     raise ConfigError(f"TIMEFRAME must be one of {TIMEFRAMES}, got {TIMEFRAME!r}")
-DASHBOARD_TIMEFRAMES = ("1m", "5m", "15m", "30m", "1h")  # choices on the dashboard switch
+DASHBOARD_TIMEFRAMES = ("1m", "5m", "15m", "30m", "1h", "4h")  # choices on the dashboard switch
 
 
 def candle_freq(timeframe: str) -> str:

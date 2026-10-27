@@ -5,7 +5,7 @@ from pathlib import Path
 # Tests assume the default strategy and a SOL-only wallet, whatever .env says.
 os.environ.update(
     STRATEGY="sma", TIMEFRAME="1h", SMA_FAST="20", SMA_SLOW="50", ENTRY="cross", EDGE_BPS="0", TREND_CONFIRM="false",
-    STOP_ATR="0", HARD_STOP_PCT="0", REENTRY_CANDLES="0", REGIME_LEN="0", ASSETS="SOL", RISKY_ASSETS="", RISKY="false", LOOP_INTERVAL_SECONDS="60",
+    STOP_ATR="0", HARD_STOP_PCT="0", REENTRY_CANDLES="0", REGIME_LEN="0", RISK_PCT="0", ASSETS="SOL", RISKY_ASSETS="", RISKY="false", LOOP_INTERVAL_SECONDS="60",
 )
 
 import pytest

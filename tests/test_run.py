@@ -10,6 +10,8 @@ from bot.config import load_settings
 from bot.run import Context, SimBroker, run_cycle, run_loop
 from bot.strategy import Signal, sma_crossover_signal
 
+SETUP = "2026-01-01T00:00:00+00:00"  # setup trades predate every candle in these tests
+
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 CFG = replace(load_settings({}), min_equity_usd=15.0)
 
@@ -76,17 +78,85 @@ def test_sma_buy_in_dry_run_is_simulated_and_not_repeated(conn):
 def test_sma_sell_exits_in_capped_chunks_until_dust(conn):
     closes = sell_signal_series()
     price = closes[-1]
-    db.insert_trade(conn, "buy", db.Fill(15.0, 15.0 / price, price, None), simulated=True)  # ~$15 position
+    db.insert_trade(conn, "buy", db.Fill(15.0, 15.0 / price, price, None), simulated=True, timestamp=SETUP)  # ~$15 position
     rig = Rig(conn, closes)
     for _ in range(6):
         rig.cycle()
     t = trades(conn)
     sells = t[t["side"] == "sell"]
-    assert len(sells) == 3  # $5 + $5 + remainder, one chunk per cycle
+    assert len(sells) == 3  # $5 + $5 + remainder, capped chunks in one cycle
     assert (sells["amount_out"] <= CFG.max_trade_usdc).all()
     assert db.latest_balance(conn)["wsol"] * price < 1.0  # only dust left
     rig.cycle()
     assert len(trades(conn)) == len(t)  # signal satisfied: nothing more to do
+
+
+def next_candle(rig):
+    """Move the rig one candle on: the old forming candle closes and a new one opens at the same price."""
+    rig.frame = candle_frame(list(rig.frame["close"]) + [rig.frame["close"].iloc[-1]])
+    rig.now += timedelta(hours=1)
+
+
+def test_a_capped_sell_keeps_selling_on_later_candles_even_when_the_rule_says_hold(conn, monkeypatch):
+    monkeypatch.setattr("bot.run.MAX_SELL_CHUNKS", 1)  # an exit cut short (say, a failed swap) leaves a remainder
+    closes = sell_signal_series()
+    price = closes[-1]
+    db.insert_trade(conn, "buy", db.Fill(15.0, 15.0 / price, price, None), simulated=True, timestamp=SETUP)
+    rig = Rig(conn, closes)
+    rig.cycle()  # one $5 chunk on the cross candle
+    next_candle(rig)
+    assert sma_crossover_signal(rig.frame.iloc[:-1]) is Signal.HOLD  # no new cross: the plain rule would hold
+    rig.cycle()
+    next_candle(rig)
+    rig.cycle()
+    sells = trades(conn)[trades(conn)["side"] == "sell"]
+    assert len(sells) == 3 and db.latest_balance(conn)["wsol"] * price < 1.0
+
+
+def test_a_position_bigger_than_the_capped_sell_left_is_not_dumped(conn, monkeypatch):
+    """A live buy that landed after an unknown outcome (or a manual top-up) is not a leftover of the last sell."""
+    monkeypatch.setattr("bot.run.MAX_SELL_CHUNKS", 1)  # an exit cut short (say, a failed swap) leaves a remainder
+    closes = sell_signal_series()
+    price = closes[-1]
+    db.insert_trade(conn, "buy", db.Fill(15.0, 15.0 / price, price, None), simulated=True, timestamp=SETUP)
+    rig = Rig(conn, closes)
+    rig.cycle()  # capped sell: ~$10 left in the log
+    left = db.open_position(conn, "SOL", True)[0]
+
+    class ToppedUp(SimBroker):
+        def balances(self):
+            b = super().balances()
+            return b._replace(wsol=b.wsol + left)  # the wallet holds twice what the log says is left
+
+    rig.ctx.broker = ToppedUp(conn, CFG)
+    next_candle(rig)
+    rig.cycle()
+    assert len(trades(conn)[trades(conn)["side"] == "sell"]) == 1  # the normal rule (hold) decides
+
+
+def test_a_dry_run_sell_never_makes_the_live_bot_sell(conn, monkeypatch):
+    monkeypatch.setattr("bot.run.MAX_SELL_CHUNKS", 1)  # an exit cut short (say, a failed swap) leaves a remainder
+    closes = sell_signal_series()
+    price = closes[-1]
+    db.insert_trade(conn, "buy", db.Fill(15.0, 15.0 / price, price, None), simulated=True, timestamp=SETUP)
+    rig = Rig(conn, closes)
+    rig.cycle()  # dry run: a capped sell leaves a simulated position
+
+    sent = []
+
+    class LiveWallet:
+        def balances(self):
+            return db.Balances(10.0, 0.05, 0.05, {})  # a real 0.05 wSOL the bot never traded
+
+        def swap(self, side, amount_in, ref_price, asset="SOL"):
+            sent.append(side)
+            raise AssertionError("no live swap expected")
+
+    rig.ctx.cfg = replace(CFG, dry_run=False)
+    rig.ctx.broker = LiveWallet()
+    next_candle(rig)
+    rig.cycle()
+    assert sent == []
 
 
 def test_dca_buys_on_interval_only(conn):
@@ -151,7 +221,7 @@ def test_equity_below_floor_halts_and_stays_halted_across_restart(conn):
 
 
 def test_halt_does_not_sell_the_open_position(conn):
-    db.insert_trade(conn, "buy", db.Fill(10.0, 0.1, 100.0, None), simulated=True)
+    db.insert_trade(conn, "buy", db.Fill(10.0, 0.1, 100.0, None), simulated=True, timestamp=SETUP)
     cfg = replace(CFG, min_equity_usd=1000.0)
     Rig(conn, sell_signal_series(), cfg=cfg).cycle()
     assert db.is_halted(conn)

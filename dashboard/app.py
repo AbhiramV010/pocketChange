@@ -279,7 +279,8 @@ def live_view() -> None:
         on_change=set_timeframe,
         disabled=PUBLIC,
         label_visibility="collapsed",
-        help="Candle size the bot trades on. Shorter means more trades and more fees.",
+        help="Candle size the bot trades on. Shorter means more trades and more fees: in backtests every setting "
+        "below 4h lost money after costs.",
     )
     st.divider()
 

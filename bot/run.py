@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import logging
 import logging.handlers
+import math
 import os
 import signal
 import sqlite3
@@ -20,13 +21,13 @@ from bot import chain, data, db, ml
 from bot.assets import ASSETS, PRIMARY, label
 from bot.config import FEE_RATE, MIN_TRADE_USDC, SLIPPAGE_RATE, TIMEFRAME, Settings, settings
 from bot.db import Balances, Fill
-from bot.strategy import Params, Signal, dca_signal, decide, momentum, regime_ok, size_trade, stop_hit
+from bot.strategy import Params, Signal, bars_since, buy_budget, dca_signal, decide, momentum, regime_ok, size_trade
 
 log = logging.getLogger("bot")
 
-ROUND_TRIP_COST = 2 * (FEE_RATE + SLIPPAGE_RATE)  # buy and sell, each with fee and slippage
 MAX_SWAP_RETRIES = 1  # hard rule: a failed swap is retried at most once per cycle
 MAX_ATTEMPT_CYCLES = 3  # cycles that may try the same signal before giving up on it
+MAX_SELL_CHUNKS = 10  # capped swaps one exit may take in a cycle; anything left continues next cycle
 REGIME_ASSET = "BTC"  # the market filter looks at BTC
 ALREADY_RUNNING_EXIT = 3  # exit code when another bot holds the instance lock
 
@@ -36,7 +37,8 @@ def max_data_age(timeframe: str) -> pd.Timedelta:
 
 
 def candles_wanted(p: Params, with_ml: bool = False) -> int:
-    return max(120, p.slow + 20, p.regime_len + 5, ml.MIN_CANDLES + 30 if with_ml else 0)
+    # 2 * slow: the trend-reset check looks back up to `slow` candles, each needing a slow average
+    return max(120, 2 * p.slow + 5, p.regime_len + 5, ml.MIN_CANDLES + 30 if with_ml else 0)
 
 
 _stop = threading.Event()
@@ -132,6 +134,7 @@ class Plan:
     price: float
     closed: pd.DataFrame
     rank: float
+    budget: float = math.inf  # most USDC a buy may spend (risk sizing); MAX_TRADE_USDC still applies
 
 
 def run_cycle(ctx: Context) -> None:
@@ -167,8 +170,9 @@ def run_cycle(ctx: Context) -> None:
         log.info("paused; not trading (usdc=%.2f positions=%s)", balances.usdc, _fmt_positions(balances, prices))
         return
 
-    risk_on = _risk_on(ctx, markets)
     bench = _closed_bench(markets, now, timeframe)
+    risk_on = _risk_on(ctx, markets, bench)
+    equity = portfolio_equity(balances, prices, db.last_marks(conn))
     plans = []
     for asset in assets:
         candles, price = markets.get(asset, (pd.DataFrame(), None))
@@ -177,7 +181,7 @@ def run_cycle(ctx: Context) -> None:
                 log.warning("%s: no usable price this cycle", label(asset))
             continue
         entry_ok = asset in cfg.assets or risky_on
-        plan = _plan(ctx, asset, candles, balances, price, now, timeframe, risk_on, entry_ok, bench)
+        plan = _plan(ctx, asset, candles, balances, price, now, timeframe, risk_on, entry_ok, bench, equity)
         if plan is not None:
             plans.append(plan)
     if ctx.models is not None:
@@ -191,10 +195,14 @@ def run_cycle(ctx: Context) -> None:
     sells = [p for p in plans if p.signal is Signal.SELL]
     buys = sorted((p for p in plans if p.signal is Signal.BUY), key=lambda p: p.rank, reverse=True)
     for plan in sells + buys:
-        if db.is_halted(conn):
-            break
-        after = _trade_if_signal(ctx, plan, balances, prices, now, timeframe)
-        if after is not None:
+        # A sell bigger than MAX_TRADE_USDC goes out in capped chunks, one swap each, all before the buys (as the
+        # backtest fills them), so the buys see the cash the exit freed. _trade_if_signal stops at the last chunk.
+        for _ in range(MAX_SELL_CHUNKS if plan.signal is Signal.SELL else 1):
+            if db.is_halted(conn):
+                break
+            after = _trade_if_signal(ctx, plan, balances, prices, now, timeframe)
+            if after is None:
+                break
             balances = after
 
 
@@ -203,14 +211,16 @@ def _closed_bench(markets: dict[str, tuple[pd.DataFrame, float | None]], now: da
     return None if candles.empty else data.closed_only(candles, now, timeframe)
 
 
-def _risk_on(ctx: Context, markets: dict[str, tuple[pd.DataFrame, float | None]]) -> bool:
+def _risk_on(
+    ctx: Context, markets: dict[str, tuple[pd.DataFrame, float | None]], bench: pd.DataFrame | None
+) -> bool:
+    """The BTC filter on closed candles only, as in the backtest."""
     p = ctx.params
     if p.regime_len <= 0:
         return True
-    candles = markets.get(REGIME_ASSET, (pd.DataFrame(), None))[0]
-    if candles.empty:
-        return False  # cannot judge the market: do not open new positions
-    ok = regime_ok(candles["close"].to_numpy(float), p)
+    if bench is None or bench.empty or markets.get(REGIME_ASSET, (None, None))[1] is None:
+        return False  # cannot judge the market (no or stale BTC feed): do not open new positions
+    ok = regime_ok(bench["close"].to_numpy(float), p)
     if not ok:
         log.info("risk-off: %s is below its %d-candle average; no new positions", REGIME_ASSET, p.regime_len)
     return ok
@@ -286,80 +296,131 @@ def _state_key(key: str, asset: str) -> str:
     return key if asset == PRIMARY else f"{key}:{asset}"  # SOL keeps the original keys
 
 
+def _last_trade(conn: sqlite3.Connection, cfg: Settings, asset: str, closed: pd.DataFrame, timeframe: str):
+    """(side, candles since) of the bot's latest trade in this coin, in this mode: 0 means during the forming
+    candle, 1 during the latest closed one. (None, None) if it never traded."""
+    last = db.last_trade(conn, cfg.dry_run, asset)
+    return (None, None) if last is None else (last[0], bars_since(closed, last[1], timeframe))
+
+
+def _exiting(side: str | None, ago: float | None, wallet_qty: float, log_qty: float) -> bool:
+    """A sell capped by MAX_TRADE_USDC left part of the position: keep selling until flat.
+
+    Only right after that sell (this candle or the last), and only if the wallet holds no more than the trade log
+    says it left. Anything else (a buy that landed after an unknown outcome, a manual trade, an old sell) is not a
+    leftover, so the normal rules decide. Read from the trade log, so a dry run never affects live."""
+    return side == "sell" and ago is not None and ago <= 1 and 0 < wallet_qty <= log_qty * 1.001
+
+
+def _one_decision_per_candle(signal: Signal, side: str | None, ago: float | None) -> Signal:
+    """As in the backtest, a coin is judged once per closed candle: one bought during the forming candle is not
+    sold in it, and one sold is not bought back in it. The loop runs every minute on the same closed candles, so
+    without this a fresh fill is re-judged against a stale close (a stop) or a signal still showing (a re-buy),
+    and the bot trades back and forth until the candle closes. Selling the rest of a capped sell is allowed."""
+    if ago is None or ago >= 1:
+        return signal
+    if (signal is Signal.SELL and side == "buy") or (signal is Signal.BUY and side == "sell"):
+        return Signal.HOLD
+    return signal
+
+
+def _budget(ctx: Context, closed: pd.DataFrame, equity: float | None) -> float:
+    if equity is None:
+        return ctx.cfg.max_trade_usdc  # a held coin has no price: fall back to the flat cap
+    return buy_budget(
+        equity, closed["high"].to_numpy(float), closed["low"].to_numpy(float), closed["close"].to_numpy(float),
+        ctx.params, ctx.cfg.max_trade_usdc,
+    )
+
+
 def _plan(
     ctx: Context, asset: str, candles: pd.DataFrame, balances: Balances, price: float, now: datetime,
-    timeframe: str, risk_on: bool, entry_ok: bool, bench: pd.DataFrame | None = None,
+    timeframe: str, risk_on: bool, entry_ok: bool, bench: pd.DataFrame | None = None, equity: float | None = None,
 ) -> Plan | None:
     cfg, conn, p = ctx.cfg, ctx.conn, ctx.params
     closed = data.closed_only(candles, now, timeframe)
     name = label(asset)
     if cfg.strategy == "ml":
-        return _plan_ml(ctx, asset, closed, balances, price, timeframe, risk_on, entry_ok, bench)
+        return _plan_ml(ctx, asset, closed, balances, price, timeframe, risk_on and entry_ok, bench, equity)
+    budget = math.inf
+    side, ago = (None, None) if closed.empty else _last_trade(conn, cfg, asset, closed, timeframe)
     if cfg.strategy == "sma":
         if len(closed) < p.slow + 1:
             log.info("%s: warming up: %d of %d closed candles", name, len(closed), p.slow + 1)
             return None
-        _, entry_price, entry_time = db.open_position(conn, asset, cfg.dry_run)
+        log_qty, entry_price, entry_time = db.open_position(conn, asset, cfg.dry_run)
         holding = balances.qty(asset) * price >= MIN_TRADE_USDC
         signal = decide(
             closed, p, holding=holding, entry_price=entry_price, entry_time=entry_time,
-            last_sell_time=db.last_trade_time(conn, "sell", cfg.dry_run, asset), risk_on=risk_on, timeframe=timeframe,
+            last_sell_time=db.last_trade_time(conn, "sell", cfg.dry_run, asset), risk_on=risk_on,
+            exiting=holding and _exiting(side, ago, balances.qty(asset), log_qty), timeframe=timeframe,
         )
+        if signal is Signal.BUY and not holding:
+            budget = _budget(ctx, closed, equity)
     else:
         signal = dca_signal(closed, db.last_trade_time(conn, "buy", cfg.dry_run, asset), cfg.dca_interval_hours, timeframe)
+    signal = _one_decision_per_candle(signal, side, ago)
     if signal is Signal.BUY and not entry_ok:
         signal = Signal.HOLD  # risky asset with the switch off: exits only
     if signal is Signal.HOLD:
         log.info("hold | %s %s | price=%.6g usdc=%.2f qty=%.6g", name, timeframe, price, balances.usdc, balances.qty(asset))
         return None
-    return Plan(asset, signal, price, closed, momentum(closed["close"].to_numpy(float), p.slow))
+    return Plan(asset, signal, price, closed, momentum(closed["close"].to_numpy(float), p.slow), budget)
 
 
 def _plan_ml(
     ctx: Context, asset: str, closed: pd.DataFrame, balances: Balances, price: float, timeframe: str,
-    risk_on: bool, entry_ok: bool, bench: pd.DataFrame | None,
+    entry_ok: bool, bench: pd.DataFrame | None, equity: float | None = None,
 ) -> Plan | None:
+    """The AI's call through `ml.ml_decide`, the same rule the backtest runs. Without a usable probability it
+    opens nothing, but the stops still guard what is held."""
     cfg, conn = ctx.cfg, ctx.conn
     name = label(asset)
     bundle = ctx.models.get(timeframe) if ctx.models is not None else None
+    prob = None
+    mp = ml.MLParams.from_settings(cfg)
     if bundle is None:
         if not ctx.ml_notice:
             log.info("AI: no trained model for %s yet (it trains in the background, or run: python -m bot.ml train)", timeframe)
             ctx.ml_notice = True
-        return None
-    if len(closed) < ml.MIN_CANDLES:
+    elif len(closed) < ml.MIN_CANDLES:
         log.info("%s: warming up: %d of %d closed candles", name, len(closed), ml.MIN_CANDLES)
-        return None
-    prob = bundle.proba(ml.features(closed, bench).iloc[-1])
-    if prob is None:
-        log.info("%s: not enough clean history for the AI yet", name)
-        return None
-    ctx.scores[asset] = prob
-    db.record_prediction(conn, asset, timeframe, closed.index[-1].isoformat(), prob, price,
-                         bundle.params.horizon, bundle.params.target_pct)
-    _grade_predictions(conn, asset, timeframe, closed)
-    enter = _learned_enter(conn, timeframe, cfg.ml_enter) if cfg.ml_adapt else cfg.ml_enter
-    params = ml.MLParams(bundle.params.horizon, bundle.params.target_pct, enter, cfg.ml_exit)
-    _, entry_price, entry_time = db.open_position(conn, asset, cfg.dry_run)
+    else:
+        prob = bundle.proba(ml.features(closed, bench).iloc[-1])
+        if prob is None:
+            log.info("%s: not enough clean history for the AI yet", name)
+    if prob is not None and bundle is not None:
+        ctx.scores[asset] = prob
+        db.record_prediction(conn, asset, timeframe, closed.index[-1].isoformat(), prob, price,
+                             bundle.params.horizon, bundle.params.target_pct)
+        _grade_predictions(conn, asset, timeframe, closed)
+        enter = _learned_enter(conn, timeframe, cfg.ml_enter, bundle.params.horizon) if cfg.ml_adapt else cfg.ml_enter
+        mp = ml.MLParams(bundle.params.horizon, bundle.params.target_pct, enter, cfg.ml_exit)
     holding = balances.qty(asset) * price >= MIN_TRADE_USDC
+    if (prob is None and not holding) or closed.empty:
+        return None
+    log_qty, entry_price, entry_time = db.open_position(conn, asset, cfg.dry_run)
+    side, ago = _last_trade(conn, cfg, asset, closed, timeframe)
     freq = pd.Timedelta(data.candle_delta(timeframe))
-    bars = int((closed.index >= pd.Timestamp(entry_time).floor(freq)).sum()) if entry_time is not None else 0
-    signal = ml.ml_signal(prob, holding, bars, params)
-    if holding and stop_hit(
-        closed["high"].to_numpy(float), closed["low"].to_numpy(float), closed["close"].to_numpy(float),
-        entry_price, bars or len(closed), ctx.params,
-    ):
-        signal = Signal.SELL
-    if signal is Signal.BUY and not (risk_on and entry_ok):
-        signal = Signal.HOLD
-    log.info("ai | %s %s p(win)=%.2f -> %s", name, timeframe, prob, signal.value)
+    # candles closed since the buy (0 while it is still forming); with no recorded buy, the whole window, as decide()
+    bars = int((closed.index >= pd.Timestamp(entry_time).floor(freq)).sum()) if entry_time is not None else len(closed)
+    signal = ml.ml_decide(
+        prob, closed["close"].to_numpy(float), closed["high"].to_numpy(float), closed["low"].to_numpy(float), mp,
+        ctx.params, holding=holding, entry_price=entry_price, bars_held=bars,
+        bars_since_sell=bars_since(closed, db.last_trade_time(conn, "sell", cfg.dry_run, asset), timeframe),
+        risk_on=entry_ok, exiting=holding and _exiting(side, ago, balances.qty(asset), log_qty),
+    )
+    signal = _one_decision_per_candle(signal, side, ago)
+    log.info("ai | %s %s p(win)=%s -> %s", name, timeframe, "-" if prob is None else f"{prob:.2f}", signal.value)
     if signal is Signal.HOLD:
         return None
-    return Plan(asset, signal, price, closed, prob)
+    budget = _budget(ctx, closed, equity) if signal is Signal.BUY else math.inf
+    return Plan(asset, signal, price, closed, prob or 0.0, budget)
 
 
 def _grade_predictions(conn, asset: str, timeframe: str, closed: pd.DataFrame) -> None:
-    """Score each open prediction once its horizon has closed: did the coin gain more than the target?"""
+    """Score each open prediction once its horizon has closed: would buying then and selling now have kept more
+    than the target after fees and slippage?"""
     closes = closed["close"]
     for row in db.open_predictions(conn, asset, timeframe):
         candle = pd.Timestamp(row["candle"])
@@ -368,17 +429,16 @@ def _grade_predictions(conn, asset: str, timeframe: str, closed: pd.DataFrame) -
         pos = closes.index.get_loc(candle) + row["horizon"]
         if pos >= len(closes):
             continue  # horizon not over yet
-        gross = closes.iloc[pos] / row["price0"] - 1
-        net = (1 + gross) * (1 - ROUND_TRIP_COST) - 1  # what a real buy-then-sell would have kept after fees and slippage
-        db.resolve_prediction(conn, row["id"], float(net), bool(gross > row["target_pct"] / 100))
+        net = ml.net_of_costs(closes.iloc[pos] / row["price0"] - 1)
+        db.resolve_prediction(conn, row["id"], float(net), bool(net > row["target_pct"] / 100))
 
 
-def _learned_enter(conn, timeframe: str, default: float) -> float:
-    """The buy threshold the AI has learned from its own graded predictions (reward-based)."""
+def _learned_enter(conn, timeframe: str, default: float, horizon: int) -> float:
+    """The buy threshold the AI has proven on its own graded predictions (see `ml.best_threshold`)."""
     rows = db.resolved_predictions(conn, timeframe)
-    resolved = [(r["p"], r["fwd_return"]) for r in rows]
-    enter = ml.best_threshold(resolved, default=default)
-    db.set_ml_learn(conn, {"timeframe": timeframe, "enter": enter, "graded": len(resolved)})
+    calls = [(r["p"], r["fwd_return"], pd.Timestamp(r["candle"])) for r in rows]
+    enter = ml.best_threshold(calls, default, data.candle_delta(timeframe) * horizon)
+    db.set_ml_learn(conn, {"timeframe": timeframe, "enter": enter, "graded": len(calls)})
     return enter
 
 
@@ -405,9 +465,10 @@ def _trade_if_signal(
         return None  # gave up on this signal; the next one starts fresh
 
     held = balances.qty(asset)
+    cap = min(cfg.max_trade_usdc, plan.budget) if signal is Signal.BUY else cfg.max_trade_usdc
     amount = size_trade(
         signal, cfg.strategy, usdc=balances.usdc, wsol=held, price=price,
-        max_trade_usdc=cfg.max_trade_usdc, dca_amount_usdc=cfg.dca_amount_usdc, min_trade_usdc=MIN_TRADE_USDC,
+        max_trade_usdc=cap, dca_amount_usdc=cfg.dca_amount_usdc, min_trade_usdc=MIN_TRADE_USDC,
     )
     if amount <= 0:
         log.info("%s %s signal, nothing to trade (usdc=%.2f qty=%.6g)", name, signal.value, balances.usdc, held)
@@ -439,7 +500,7 @@ def _trade_if_signal(
     db.set_state(conn, count_key, "0")
     left_usd = (held - fill.amount_in) * price
     if side == "buy" or left_usd < MIN_TRADE_USDC:
-        db.set_state(conn, done_key, key)  # a capped sell of a big position continues next cycle
+        db.set_state(conn, done_key, key)  # a capped sell of a big position continues next cycle (see _exiting)
     log.info(
         "%s %s filled: in=%.9f out=%.9f price=%.6g %s", name, side, fill.amount_in, fill.amount_out, fill.price,
         fill.tx_hash or "(simulated)",

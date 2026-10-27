@@ -377,6 +377,15 @@ def last_trade_time(conn: sqlite3.Connection, side: str, simulated: bool, asset:
     return pd.Timestamp(row["timestamp"]) if row else None
 
 
+def last_trade(conn: sqlite3.Connection, simulated: bool, asset: str = "SOL") -> tuple[str, pd.Timestamp] | None:
+    """(side, time) of the latest trade in this coin, in this mode."""
+    row = conn.execute(
+        "SELECT side, timestamp FROM trades WHERE simulated = ? AND asset = ? ORDER BY id DESC LIMIT 1",
+        (int(simulated), asset),
+    ).fetchone()
+    return (row["side"], pd.Timestamp(row["timestamp"])) if row else None
+
+
 def open_position(conn: sqlite3.Connection, asset: str, simulated: bool) -> tuple[float, float, pd.Timestamp | None]:
     """(quantity, average entry price, time of the latest buy) replayed from the trade log."""
     qty = cost = 0.0

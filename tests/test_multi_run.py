@@ -10,6 +10,8 @@ from bot.config import load_settings
 from bot.run import Context, SimBroker, run_cycle
 from bot.strategy import Params
 
+SETUP = "2026-01-01T00:00:00+00:00"  # setup trades predate every candle in these tests
+
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 TREND = Params(
     fast=5, slow=20, entry="trend", edge_bps=0.0, confirm=False, stop_atr=0.0, hard_stop_pct=0.0,
@@ -90,7 +92,7 @@ def test_buys_are_ranked_by_momentum_and_capped_by_max_positions(conn):
 
 def test_sells_run_before_buys_so_the_freed_cash_is_used(conn):
     cfg = replace(BASE, sim_start_usdc=5.0, max_positions=3)
-    db.insert_trade(conn, "buy", db.Fill(5.0, 0.05, 100.0, None), True, asset="SOL")  # all cash is in SOL
+    db.insert_trade(conn, "buy", db.Fill(5.0, 0.05, 100.0, None), True, asset="SOL", timestamp=SETUP)  # all cash is in SOL
     m = Market(conn, {"SOL": series(-0.004), "BTC": series(0.004), "ETH": series(0.0)}, cfg=cfg)
     m.cycle()
     assert m.broker.swaps == [("sell", "SOL"), ("buy", "BTC")]
@@ -108,7 +110,7 @@ def test_regime_filter_blocks_new_entries_until_btc_turns_up(conn):
 
 
 def test_regime_never_blocks_an_exit(conn):
-    db.insert_trade(conn, "buy", db.Fill(5.0, 0.05, 100.0, None), True, asset="ETH")
+    db.insert_trade(conn, "buy", db.Fill(5.0, 0.05, 100.0, None), True, asset="ETH", timestamp=SETUP)
     params = replace(TREND, regime_len=30)
     m = Market(conn, {"SOL": series(0.0), "BTC": series(-0.003), "ETH": series(-0.004)}, params=params)
     m.cycle()
@@ -124,16 +126,18 @@ def test_risky_assets_trade_only_while_the_switch_is_on_but_always_exit(conn):
     m.cycle()
     assert m.broker.swaps == [("buy", "BONK")]
     db.set_risky(conn, False)
-    m.frames["BONK"] = frame(series(-0.01))  # the memecoin reverses while the switch is off
+    m.now += timedelta(hours=1)  # a candle later the memecoin has reversed, with the switch off
+    m.frames.update(SOL=frame(series(0.0, n=81)), BONK=frame(series(-0.01, n=81)))
     m.cycle()
     assert m.broker.swaps == [("buy", "BONK"), ("sell", "BONK")]  # the exit still runs; no position is stranded
-    m.frames["BONK"] = frame(series(0.01))
+    m.now += timedelta(hours=1)
+    m.frames.update(SOL=frame(series(0.0, n=82)), BONK=frame(series(0.01, n=82)))
     m.cycle()
     assert len(m.broker.swaps) == 2  # and nothing is re-bought
 
 
 def test_hard_stop_cuts_a_holding_even_when_the_trend_is_up(conn):
-    db.insert_trade(conn, "buy", db.Fill(5.0, 0.0166, 300.0, None), True, asset="BTC")  # bought at 300
+    db.insert_trade(conn, "buy", db.Fill(5.0, 0.0166, 300.0, None), True, asset="BTC", timestamp=SETUP)  # bought at 300
     params = replace(TREND, hard_stop_pct=10.0)
     m = Market(conn, {"SOL": series(0.0), "BTC": series(0.004, start=100.0), "ETH": series(0.0)}, params=params)
     m.cycle()
@@ -141,7 +145,7 @@ def test_hard_stop_cuts_a_holding_even_when_the_trend_is_up(conn):
 
 
 def test_equity_floor_counts_every_position(conn):
-    db.insert_trade(conn, "buy", db.Fill(5.0, 0.05, 100.0, None), True, asset="BTC")  # worth $5 at entry
+    db.insert_trade(conn, "buy", db.Fill(5.0, 0.05, 100.0, None), True, asset="BTC", timestamp=SETUP)  # worth $5 at entry
     cfg = replace(BASE, min_equity_usd=19.0)
     m = Market(conn, {"SOL": series(0.0), "BTC": series(-0.03), "ETH": series(0.0)}, cfg=cfg)
     m.cycle()  # BTC has collapsed, so equity is 15 + a little
