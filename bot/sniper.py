@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
+import time
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -33,6 +34,7 @@ MAX_ENTRIES_PER_SCAN = 2
 EXIT_ROUTE_FAILURES = 3
 RUG_VALUE_FRACTION = 0.05  # a position worth under 5% of its cost is treated as rugged
 REJECT_TTL_S = 600
+RATE_WAIT_MAX_S = 12.0  # longest wait for Jupiter's rate-limit window (5 requests per 10 s on the keyless tier)
 
 
 class RateLimited(Exception):
@@ -60,9 +62,9 @@ class Sniper:
 
     def __init__(
         self, cfg: Settings, conn: sqlite3.Connection, http: requests.Session | None = None,
-        clock: Callable[[], datetime] = _utc_now,
+        clock: Callable[[], datetime] = _utc_now, sleep: Callable[[float], None] = time.sleep,
     ):
-        self._cfg, self._conn, self._clock = cfg, conn, clock
+        self._cfg, self._conn, self._clock, self._sleep = cfg, conn, clock, sleep
         self._http = http or requests.Session()
         self._last_step: datetime | None = None
         self._rejected: dict[str, datetime] = {}
@@ -70,10 +72,24 @@ class Sniper:
     # --- network -------------------------------------------------------------------------------------------
 
     def _get(self, url: str, params: dict | None = None):
-        resp = self._http.get(url, params=params, timeout=HTTP_TIMEOUT_S)
-        if resp.status_code == 429:
-            raise RateLimited(url)
-        return resp
+        """GET that paces itself: one scan needs more requests than Jupiter allows per window, so instead of
+        giving up on the whole step at the first 429 it waits for the window to reset (once per request)."""
+        for attempt in range(2):
+            resp = self._http.get(url, params=params, timeout=HTTP_TIMEOUT_S)
+            if resp.status_code != 429:
+                if resp.headers.get("x-ratelimit-remaining") == "0":
+                    self._wait_for_window(resp)  # the next request would be refused
+                return resp
+            if attempt == 0:
+                self._wait_for_window(resp)
+        raise RateLimited(url)
+
+    def _wait_for_window(self, resp) -> None:
+        try:
+            delay = float(resp.headers.get("x-ratelimit-reset", "")) - time.time() + 0.5  # reset is a unix time
+        except ValueError:
+            delay = RATE_WAIT_MAX_S
+        self._sleep(min(max(delay, 0.5), RATE_WAIT_MAX_S))
 
     def _quote(self, mint_in: str, mint_out: str, amount_raw: int) -> dict | None:
         """A Jupiter quote, or None when there is no route (which is itself information)."""

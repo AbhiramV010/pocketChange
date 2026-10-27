@@ -20,8 +20,9 @@ USDC = str(USDC_MINT)
 
 
 class Resp:
-    def __init__(self, status, body):
+    def __init__(self, status, body, headers=None):
         self.status_code, self._body, self.text = status, body, json.dumps(body)
+        self.headers = headers or {}
 
     def json(self):
         return self._body
@@ -34,8 +35,13 @@ class FakeHttp:
         self.tokens, self.recent_status = [], 200
         self.buy, self.sell = {}, {}  # mint -> (out_raw, impact) / out_usdc_raw; None means no route
         self.quote_calls = 0
+        self.window, self.used = None, 0  # requests allowed until the rate-limit window resets (None = unlimited)
 
     def get(self, url, params=None, timeout=None):
+        if self.window is not None:
+            if self.used >= self.window:
+                return Resp(429, {"error": "rate limited"}, {"x-ratelimit-remaining": "0"})
+            self.used += 1
         if url.endswith("/recent"):
             return Resp(self.recent_status, self.tokens)
         assert url.endswith("/quote")
@@ -61,8 +67,8 @@ def token(mint="TokenA", *, age_min=1.0, liquidity=5000.0, holders=10, dev_mints
 
 class Rig:
     def __init__(self, conn, cfg=CFG, risky=True):
-        self.conn, self.http, self.now = conn, FakeHttp(), NOW
-        self.sniper = Sniper(cfg, conn, http=self.http, clock=lambda: self.now)
+        self.conn, self.http, self.now, self.waits = conn, FakeHttp(), NOW, []
+        self.sniper = Sniper(cfg, conn, http=self.http, clock=lambda: self.now, sleep=self._sleep)
         db.set_risky(conn, risky)
 
     def list(self, *tokens, out_raw=1_000_000_000, impact=0.01, sells=2_000_000):
@@ -70,6 +76,10 @@ class Rig:
         for t in tokens:
             self.http.buy[t["id"]] = (out_raw, impact)
             self.http.sell[t["id"]] = sells
+
+    def _sleep(self, seconds):
+        self.waits.append(seconds)
+        self.http.used = 0  # the rate-limit window resets while the sniper waits
 
     def step(self, minutes=1.0):
         self.now += timedelta(minutes=minutes)
@@ -207,6 +217,15 @@ def test_steps_are_throttled_and_network_trouble_is_swallowed(conn):
     rig.http.tokens = [token("Other")]
     rig.step()  # a rate limit never raises
     assert len(rig.snipes()) == 1
+
+
+def test_a_scan_that_needs_more_requests_than_the_rate_limit_allows_waits_for_the_window(conn):
+    rig = Rig(conn)
+    rig.http.window = 3  # Jupiter's keyless tier allows a handful of requests per window; a scan needs more
+    rig.list(token("A"), token("B"))
+    rig.step()
+    assert len(rig.snipes()) == 2 and rig.waits  # it waited for the window instead of dropping the step
+    assert all(0 < w <= 12 for w in rig.waits)
 
 
 def test_symbols_are_sanitised_before_they_reach_logs_and_the_database():
