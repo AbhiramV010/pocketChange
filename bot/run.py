@@ -587,6 +587,21 @@ def run_loop(ctx: Context, once: bool = False) -> None:
     log.info("stopped")
 
 
+def run_sniper(cfg: Settings) -> None:
+    """The simulated sniper on its own thread and database connection, so its rate-limit waits never delay a cycle."""
+    from bot.sniper import Sniper
+
+    conn = db.connect(cfg.db_path)
+    sniper = Sniper(cfg, conn)
+    while not _stop.is_set():
+        try:
+            sniper.step()
+        except Exception:
+            log.exception("sniper step failed")
+        _stop.wait(1.0)  # step() throttles itself to SNIPER_INTERVAL_SECONDS
+    conn.close()
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="pocketchange trading loop")
     parser.add_argument("--once", action="store_true", help="run a single cycle and exit")
@@ -635,15 +650,11 @@ def main(argv: list[str] | None = None) -> None:
     need_bench = params.regime_len > 0 or cfg.strategy == "ml"
     symbols = list(dict.fromkeys(cfg.assets + cfg.risky_assets + ((REGIME_ASSET,) if need_bench else ())))
     extra = {a: feed_for(ASSETS[a].market) for a in symbols if a != PRIMARY}
-    sniper = None
     if cfg.dry_run and cfg.sniper:
-        from bot.sniper import Sniper
-
-        sniper = Sniper(cfg, conn)
+        threading.Thread(target=run_sniper, args=(cfg,), name="sniper", daemon=True).start()
     models = ml.ModelManager(cfg) if cfg.strategy == "ml" else None
     ctx = Context(
-        cfg, conn, broker, feed=feed_for(ASSETS[PRIMARY].market), extra_feeds=extra, params=params, sniper=sniper,
-        models=models,
+        cfg, conn, broker, feed=feed_for(ASSETS[PRIMARY].market), extra_feeds=extra, params=params, models=models,
     )
     install_stop_handlers()
     try:

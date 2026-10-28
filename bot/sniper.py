@@ -16,7 +16,7 @@ from typing import Callable
 
 import requests
 
-from bot import db
+from bot import db, sniper_learn
 from bot.chain import TOKEN_PROGRAM, USDC_MINT
 from bot.config import Settings
 
@@ -68,6 +68,8 @@ class Sniper:
         self._http = http or requests.Session()
         self._last_step: datetime | None = None
         self._rejected: dict[str, datetime] = {}
+        self._liq_floor, self._holders_floor = cfg.sniper_min_liquidity_usd, cfg.sniper_min_holders
+        self._learned_closed: int | None = None  # closed-snipe count the floors were last learned from
 
     # --- network -------------------------------------------------------------------------------------------
 
@@ -115,6 +117,8 @@ class Sniper:
         self._last_step = now
         try:
             self._manage_open(now)
+            self._relearn()
+            self._liq_floor, self._holders_floor = sniper_learn.floors(conn, cfg)
             entries_allowed = db.is_risky(conn, cfg.risky) and not db.is_paused(conn) and not db.is_halted(conn)
             if entries_allowed:
                 self._scan(now)
@@ -122,6 +126,12 @@ class Sniper:
             log.warning("sniper: Jupiter rate limit hit; skipping until the next step")
         except requests.RequestException as exc:
             log.warning("sniper: network error (%s); skipping this step", type(exc).__name__)
+
+    def _relearn(self) -> None:
+        closed = self._conn.execute("SELECT COUNT(*) FROM snipes WHERE status = 'closed'").fetchone()[0]
+        if closed != self._learned_closed:
+            sniper_learn.learn(self._conn, self._cfg)
+            self._learned_closed = closed
 
     def _manage_open(self, now: datetime) -> None:
         cfg, conn = self._cfg, self._conn
@@ -169,9 +179,9 @@ class Sniper:
             return False
         if (audit.get("topHoldersPercentage") or 0) > MAX_TOP_HOLDERS_PCT or (audit.get("devMints") or 0) > MAX_DEV_MINTS:
             return False
-        return (token.get("liquidity") or 0) >= cfg.sniper_min_liquidity_usd and (
+        return (token.get("liquidity") or 0) >= self._liq_floor and (
             token.get("holderCount") or 0
-        ) >= cfg.sniper_min_holders
+        ) >= self._holders_floor
 
     def _scan(self, now: datetime) -> None:
         cfg, conn = self._cfg, self._conn
@@ -223,9 +233,14 @@ class Sniper:
         if round_trip < MIN_ROUND_TRIP:
             return reject(f"round trip only {round_trip:.0%}")
         qty_raw = int(out_raw * (1 - cfg.sniper_latency_slippage))  # arriving late costs us tokens on entry
+        audit = token.get("audit") or {}
+        created = _parse_time(token.get("createdAt"))
         db.open_snipe(
             conn, mint=mint, symbol=symbol, decimals=decimals, entry_usdc=cfg.sniper_trade_usdc, qty_raw=qty_raw,
             liquidity_usd=token.get("liquidity"), timestamp=now.isoformat(timespec="seconds"),
+            holders=token.get("holderCount"), top_holders_pct=audit.get("topHoldersPercentage"),
+            dev_mints=audit.get("devMints"), age_min=None if created is None else (now - created).total_seconds() / 60,
+            impact=impact, round_trip=round_trip,
         )
         log.info(
             "sniper: bought $%.2f of %s (liquidity $%.0f, impact %.2f%%, round trip %.0f%%)",

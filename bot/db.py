@@ -74,6 +74,12 @@ CREATE TABLE IF NOT EXISTS snipes (   -- simulated new-token sniper: a sandbox t
 MIGRATIONS = (  # columns added after the first release: (table, column, definition)
     ("trades", "asset", "TEXT NOT NULL DEFAULT 'SOL'"),
     ("balances", "holdings", "TEXT"),
+    ("snipes", "holders", "INTEGER"),  # what the sniper saw at entry, so it can learn which filters pay
+    ("snipes", "top_holders_pct", "REAL"),
+    ("snipes", "dev_mints", "INTEGER"),
+    ("snipes", "age_min", "REAL"),
+    ("snipes", "impact", "REAL"),
+    ("snipes", "round_trip", "REAL"),
 )
 
 PAUSED = "paused"
@@ -90,6 +96,7 @@ RISKY = "risky"
 ML_SCORES = "ml_scores"  # latest P(win) per coin, written by the bot for the dashboard
 ML_LEARN = "ml_learn"  # what the AI has learned from its own predictions
 ML_INFO = "ml_info"  # which model is live: when trained, out-of-sample AUC, thresholds
+SNIPER_LEARN = "sniper_learn"  # the entry floors the sniper learned from its closed snipes
 RISK_OFF = "risk_off"  # why the BTC filter blocks new positions this cycle; empty while it allows them
 
 
@@ -428,13 +435,17 @@ def sim_balances(conn: sqlite3.Connection, start_usdc: float, start_sol: float) 
 
 def open_snipe(
     conn: sqlite3.Connection, *, mint: str, symbol: str, decimals: int, entry_usdc: float, qty_raw: int,
-    liquidity_usd: float | None, timestamp: str | None = None,
+    liquidity_usd: float | None, timestamp: str | None = None, holders: int | None = None,
+    top_holders_pct: float | None = None, dev_mints: int | None = None, age_min: float | None = None,
+    impact: float | None = None, round_trip: float | None = None,
 ) -> None:
     with conn:
         conn.execute(
-            "INSERT INTO snipes (mint, symbol, decimals, opened_at, entry_usdc, qty_raw, liquidity_usd, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, 'open')",
-            (mint, symbol, decimals, timestamp or utc_now_iso(), entry_usdc, qty_raw, liquidity_usd),
+            "INSERT INTO snipes (mint, symbol, decimals, opened_at, entry_usdc, qty_raw, liquidity_usd, status, "
+            "holders, top_holders_pct, dev_mints, age_min, impact, round_trip) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)",
+            (mint, symbol, decimals, timestamp or utc_now_iso(), entry_usdc, qty_raw, liquidity_usd,
+             holders, top_holders_pct, dev_mints, age_min, impact, round_trip),
         )
 
 
