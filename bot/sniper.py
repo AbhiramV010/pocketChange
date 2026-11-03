@@ -268,7 +268,7 @@ class Sniper:
             impact=impact, round_trip=round_trip, fee_usd=fee,
         )
         log.info(
-            "sniper: bought $%.2f of %s (liquidity $%.0f, impact %.2f%%, round trip %.0f%%)",
-            cfg.sniper_trade_usdc, symbol, token.get("liquidity") or 0, impact * 100, round_trip * 100,
+            "sniper: bought $%.2f of %s (+$%.3f fee; liquidity $%.0f, impact %.2f%%, round trip %.0f%%)",
+            cfg.sniper_trade_usdc, symbol, fee, token.get("liquidity") or 0, impact * 100, round_trip * 100,
         )
         return True
