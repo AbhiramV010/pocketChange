@@ -122,7 +122,6 @@ class Context:
     clock: Callable[[], datetime] = field(default=_utc_now)
     extra_feeds: dict[str, Callable[[str], pd.DataFrame]] = field(default_factory=dict)  # the other assets
     params: Params = field(default_factory=Params)
-    sniper: object | None = None  # bot.sniper.Sniper in dry runs, else None
     models: object | None = None  # bot.ml.ModelManager when STRATEGY=ml
     scores: dict[str, float] = field(default_factory=dict)  # this cycle's AI probabilities
     ml_notice: bool = False  # already said this cycle that there is no model
@@ -574,32 +573,29 @@ def run_loop(ctx: Context, once: bool = False) -> None:
             log.error("cycle failed: %s", exc)
         except Exception:
             log.exception("cycle failed")
-        if ctx.sniper is not None:  # a separate sandbox: it can never break or delay the main strategy
-            try:
-                ctx.sniper.step()
-            except KeyboardInterrupt:
-                raise
-            except Exception:
-                log.exception("sniper step failed")
         if once:
             return
         _stop.wait(max(1.0, ctx.cfg.loop_interval_seconds - (time.monotonic() - started)))
     log.info("stopped")
 
 
-def run_sniper(cfg: Settings) -> None:
-    """The simulated sniper on its own thread and database connection, so its rate-limit waits never delay a cycle."""
-    from bot.sniper import Sniper
+def run_sniper(cfg: Settings, sniper=None, stop: threading.Event = _stop) -> None:
+    """The simulated sniper on its own thread and database connection: a sandbox whose failures and rate-limit waits
+    can never break or delay a trading cycle."""
+    conn = None
+    if sniper is None:
+        from bot.sniper import Sniper
 
-    conn = db.connect(cfg.db_path)
-    sniper = Sniper(cfg, conn)
-    while not _stop.is_set():
+        conn = db.connect(cfg.db_path)
+        sniper = Sniper(cfg, conn)
+    while not stop.is_set():
         try:
             sniper.step()
         except Exception:
             log.exception("sniper step failed")
-        _stop.wait(1.0)  # step() throttles itself to SNIPER_INTERVAL_SECONDS
-    conn.close()
+        stop.wait(1.0)  # step() throttles itself to SNIPER_INTERVAL_SECONDS
+    if conn is not None:
+        conn.close()
 
 
 def main(argv: list[str] | None = None) -> None:

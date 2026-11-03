@@ -4,9 +4,9 @@ It replays the live loop candle by candle with the same functions (`decide_core`
 `size_trade`) in the same order (exits first, then entries best-ranked first), so a result here is a result for the
 bot as configured, not for a simplified copy of it.
 
-    python -m bot.portfolio_backtest --days 365 --timeframe 1h          # the configured rules vs buy & hold
-    python -m bot.portfolio_backtest --days 730 --timeframe 1h --ml     # the AI, scored only on candles it never saw
-    python -m bot.portfolio_backtest --days 730 --timeframe 1h --grid   # robustness: first half vs second half
+    python -m bot.portfolio_backtest --days 1000                 # the configured rules vs buy & hold
+    python -m bot.portfolio_backtest --days 1000 --ml            # the AI, scored only on candles it never saw
+    python -m bot.portfolio_backtest --days 1000 --grid          # robustness: first half vs second half
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
-from bot.config import FEE_RATE, MIN_TRADE_USDC, SLIPPAGE_RATE
+from bot.config import FEE_RATE, MIN_TRADE_USDC, SLIPPAGE_RATE, TIMEFRAME
 from bot.strategy import Params, Signal, buy_budget, decide_core, momentum, regime_ok, size_trade
 
 REGIME_ASSET = "BTC"  # the market filter looks at BTC, as in the live loop
@@ -311,7 +311,7 @@ def main(argv: list[str] | None = None) -> None:
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--days", type=int, default=365)
-    parser.add_argument("--timeframe", default="1h")
+    parser.add_argument("--timeframe", default=TIMEFRAME, help="candle size (default: TIMEFRAME, what the bot trades)")
     parser.add_argument("--assets", default=",".join(settings.assets))
     parser.add_argument("--max-positions", type=int, default=settings.max_positions)
     parser.add_argument("--ml", action="store_true", help="also backtest the AI on walk-forward probabilities")

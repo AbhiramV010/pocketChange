@@ -12,6 +12,8 @@ from tests.test_chain import token_account, unsigned_tx
 KEY = Keypair()
 BTC = ASSETS["BTC"]
 BTC_PRICE = 50_000.0
+SOL_PRICE = 150.0
+ATA_RENT = 2_039_280  # lamports a new token account locks up
 CFG = replace(
     load_settings({}), dry_run=False, solana_rpc_url="https://rpc.example/", assets=("SOL", "BTC"), gas_reserve_sol=0.01
 )
@@ -60,6 +62,8 @@ class Net:
             amount = int(params["amount"])
             if params["inputMint"] == str(chain.USDC_MINT):  # buy: USDC (6 dp) -> BTC (8 dp)
                 out = int(amount / 1e6 / BTC_PRICE * 1e8)
+            elif params["inputMint"] == str(chain.WSOL_MINT):  # the SOL price that values the fees
+                out = int(amount / 1e9 * SOL_PRICE * 1e6)
             else:  # sell: BTC -> USDC
                 out = int(amount / 1e8 * BTC_PRICE * 1e6)
             return {
@@ -129,3 +133,21 @@ def test_a_bad_simulated_btc_effect_is_refused_before_sending(client):
         client.swap(BUY, 1.0, BTC_PRICE, "BTC")
     assert "sendTransaction" not in net.calls
 
+
+def test_fees_are_valued_at_the_sol_price_not_the_coins(client):
+    """A first BTC buy pays ~0.002 SOL of account rent plus the network fee: about $0.31 at $150 a SOL. Valued at
+    the BTC price it would look like $100 and the swap would be refused."""
+    net = wire(client)
+    out = int(1.0 / BTC_PRICE * 1e8)
+    net.after = (net.before[0] - ATA_RENT - 25_000, net.before[1] - 1_000_000, 0, out)
+    fill = client.swap(BUY, 1.0, BTC_PRICE, "BTC")
+    assert fill.amount_out == pytest.approx(out / 1e8) and "sendTransaction" in net.calls
+
+
+def test_a_swap_that_really_costs_too_much_sol_is_still_refused(client):
+    net = wire(client)
+    out = int(1.0 / BTC_PRICE * 1e8)
+    net.after = (net.before[0] - 10**7, net.before[1] - 1_000_000, 0, out)  # 0.01 SOL = $1.50 > MAX_FEE_USD
+    with pytest.raises(SwapFailed, match="MAX_FEE_USD"):
+        client.swap(BUY, 1.0, BTC_PRICE, "BTC")
+    assert "sendTransaction" not in net.calls

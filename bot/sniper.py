@@ -45,6 +45,15 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def base_limits(cfg: Settings) -> dict[str, float]:
+    """The entry filters before any learning, by sniper_learn rule name: the .env values and built-in limits."""
+    return {
+        "liquidity_usd": cfg.sniper_min_liquidity_usd, "holders": cfg.sniper_min_holders,
+        "top_holders_pct": MAX_TOP_HOLDERS_PCT, "dev_mints": MAX_DEV_MINTS, "age_min": cfg.sniper_max_age_min,
+        "impact": MAX_PRICE_IMPACT,
+    }
+
+
 def clean_symbol(symbol: str | None) -> str:
     return re.sub(r"[^A-Za-z0-9$_.-]", "", symbol or "")[:12] or "?"
 
@@ -68,8 +77,9 @@ class Sniper:
         self._http = http or requests.Session()
         self._last_step: datetime | None = None
         self._rejected: dict[str, datetime] = {}
-        self._liq_floor, self._holders_floor = cfg.sniper_min_liquidity_usd, cfg.sniper_min_holders
-        self._learned_closed: int | None = None  # closed-snipe count the floors were last learned from
+        self._limits = base_limits(cfg)  # entry filters in force: the .env values, tightened by what it learned
+        self._learned_closed: int | None = None  # closed-snipe count the limits were last learned from
+        self._no_sol_price_said = False
 
     # --- network -------------------------------------------------------------------------------------------
 
@@ -118,7 +128,7 @@ class Sniper:
         try:
             self._manage_open(now)
             self._relearn()
-            self._liq_floor, self._holders_floor = sniper_learn.floors(conn, cfg)
+            self._limits = sniper_learn.limits(conn, base_limits(cfg))
             entries_allowed = db.is_risky(conn, cfg.risky) and not db.is_paused(conn) and not db.is_halted(conn)
             if entries_allowed:
                 self._scan(now)
@@ -130,7 +140,7 @@ class Sniper:
     def _relearn(self) -> None:
         closed = self._conn.execute("SELECT COUNT(*) FROM snipes WHERE status = 'closed'").fetchone()[0]
         if closed != self._learned_closed:
-            sniper_learn.learn(self._conn, self._cfg)
+            sniper_learn.learn(self._conn, base_limits(self._cfg))
             self._learned_closed = closed
 
     def _manage_open(self, now: datetime) -> None:
@@ -145,7 +155,8 @@ class Sniper:
                     db.close_snipe(conn, row["id"], 0.0, "no exit route (rugged or delisted)", stamp)
                     log.info("sniper: %s closed at 0: no sell route for %d checks", row["symbol"], fails)
                 continue
-            value = int(quote["outAmount"]) / 10**USDC_DECIMALS * (1 - cfg.sniper_latency_slippage)
+            fee = row["fee_usd"] or 0.0  # the network fee to sell, fixed at entry
+            value = max(int(quote["outAmount"]) / 10**USDC_DECIMALS * (1 - cfg.sniper_latency_slippage) - fee, 0.0)
             db.mark_snipe(conn, row["id"], value, 0, stamp)
             pnl = value / row["entry_usdc"] - 1
             opened = _parse_time(row["opened_at"]) or now
@@ -164,30 +175,42 @@ class Sniper:
                 log.info("sniper: %s closed (%s): $%.2f -> $%.2f (%+.1f%%)", row["symbol"], reason, row["entry_usdc"], value, pnl * 100)
 
     def _eligible(self, token: dict, now: datetime) -> bool:
-        cfg = self._cfg
+        lim = self._limits
         mint = token.get("id", "")
         rejected_at = self._rejected.get(mint)
         if rejected_at is not None and (now - rejected_at).total_seconds() < REJECT_TTL_S:
             return False
         created = _parse_time(token.get("createdAt"))
-        if created is None or (now - created).total_seconds() / 60 > cfg.sniper_max_age_min:
+        if created is None or (now - created).total_seconds() / 60 > lim["age_min"]:
             return False
         if token.get("tokenProgram") not in (str(TOKEN_PROGRAM), TOKEN_2022):
             return False
         audit = token.get("audit") or {}
         if not (audit.get("mintAuthorityDisabled") and audit.get("freezeAuthorityDisabled")):
             return False
-        if (audit.get("topHoldersPercentage") or 0) > MAX_TOP_HOLDERS_PCT or (audit.get("devMints") or 0) > MAX_DEV_MINTS:
+        if (audit.get("topHoldersPercentage") or 0) > lim["top_holders_pct"] or (audit.get("devMints") or 0) > lim["dev_mints"]:
             return False
-        return (token.get("liquidity") or 0) >= self._liq_floor and (
-            token.get("holderCount") or 0
-        ) >= self._holders_floor
+        return (token.get("liquidity") or 0) >= lim["liquidity_usd"] and (token.get("holderCount") or 0) >= lim["holders"]
+
+    def _fee_usd(self) -> float | None:
+        """One leg's Solana network fee in USD at the latest SOL price the bot recorded, or None if it has none yet."""
+        if self._cfg.sniper_tx_fee_sol <= 0:
+            return 0.0
+        sol = db.last_marks(self._conn).get("SOL")
+        return None if not sol else self._cfg.sniper_tx_fee_sol * sol
 
     def _scan(self, now: datetime) -> None:
         cfg, conn = self._cfg, self._conn
+        fee = self._fee_usd()
+        if fee is None:  # no SOL price recorded yet (the bot's first cycle has not run): fees cannot be charged
+            if not self._no_sol_price_said:
+                log.info("sniper: waiting for a SOL price to charge network fees before the first entry")
+                self._no_sol_price_said = True
+            return
+        cost = cfg.sniper_trade_usdc + fee
         free = db.sniper_free_usdc(conn, cfg.sniper_bankroll_usdc)
         open_count = conn.execute("SELECT COUNT(*) FROM snipes WHERE status = 'open'").fetchone()[0]
-        if open_count >= cfg.sniper_max_open or free < cfg.sniper_trade_usdc:
+        if open_count >= cfg.sniper_max_open or free < cost:
             return
         resp = self._get(f"{cfg.jupiter_tokens_url}/recent")
         if resp.status_code != 200:
@@ -201,14 +224,16 @@ class Sniper:
             if quotes >= MAX_QUOTES_PER_SCAN or entries >= MAX_ENTRIES_PER_SCAN:
                 break
             quotes += 2
-            if self._try_enter(token, now):
+            if self._try_enter(token, now, fee):
                 entries += 1
                 open_count += 1
-                free -= cfg.sniper_trade_usdc
-                if open_count >= cfg.sniper_max_open or free < cfg.sniper_trade_usdc:
+                free -= cost
+                if open_count >= cfg.sniper_max_open or free < cost:
                     break
 
-    def _try_enter(self, token: dict, now: datetime) -> bool:
+    def _try_enter(self, token: dict, now: datetime, fee: float = 0.0) -> bool:
+        """Buy `SNIPER_TRADE_USDC` of `token` in simulation. `fee` is one leg's network fee in USD: paid now on top
+        of the buy, and again out of the sale."""
         cfg, conn = self._cfg, self._conn
         mint, symbol = token["id"], clean_symbol(token.get("symbol"))
         decimals = int(token.get("decimals", 6))
@@ -223,7 +248,7 @@ class Sniper:
         if buy is None:
             return reject("no buy route")
         impact = abs(float(buy.get("priceImpactPct") or 0))
-        if impact > MAX_PRICE_IMPACT:
+        if impact > self._limits["impact"]:
             return reject(f"price impact {impact:.1%}")
         out_raw = int(buy["outAmount"])
         back = self._quote(mint, str(USDC_MINT), out_raw)
@@ -236,11 +261,11 @@ class Sniper:
         audit = token.get("audit") or {}
         created = _parse_time(token.get("createdAt"))
         db.open_snipe(
-            conn, mint=mint, symbol=symbol, decimals=decimals, entry_usdc=cfg.sniper_trade_usdc, qty_raw=qty_raw,
+            conn, mint=mint, symbol=symbol, decimals=decimals, entry_usdc=cfg.sniper_trade_usdc + fee, qty_raw=qty_raw,
             liquidity_usd=token.get("liquidity"), timestamp=now.isoformat(timespec="seconds"),
             holders=token.get("holderCount"), top_holders_pct=audit.get("topHoldersPercentage"),
             dev_mints=audit.get("devMints"), age_min=None if created is None else (now - created).total_seconds() / 60,
-            impact=impact, round_trip=round_trip,
+            impact=impact, round_trip=round_trip, fee_usd=fee,
         )
         log.info(
             "sniper: bought $%.2f of %s (liquidity $%.0f, impact %.2f%%, round trip %.0f%%)",

@@ -15,6 +15,7 @@ CFG = replace(
     sniper_interval_seconds=5.0, sniper_trade_usdc=2.0, sniper_bankroll_usdc=10.0, sniper_max_open=3,
     sniper_min_liquidity_usd=3000.0, sniper_min_holders=5, sniper_max_age_min=15.0, sniper_take_profit=0.5,
     sniper_stop_loss=0.2, sniper_max_hold_min=30.0, sniper_latency_slippage=0.02,
+    sniper_tx_fee_sol=0.0,  # most tests price trades without network fees; the fee tests turn them on
 )
 USDC = str(USDC_MINT)
 
@@ -226,6 +227,37 @@ def test_a_scan_that_needs_more_requests_than_the_rate_limit_allows_waits_for_th
     rig.step()
     assert len(rig.snipes()) == 2 and rig.waits  # it waited for the window instead of dropping the step
     assert all(0 < w <= 12 for w in rig.waits)
+
+
+def test_network_fees_are_charged_on_both_legs_at_the_bots_sol_price(conn):
+    cfg = replace(CFG, sniper_tx_fee_sol=0.0002)
+    db.insert_balance(conn, db.Balances(20.0, 0.05, 0.0), 150.0, True)  # the main loop's latest SOL mark: $150
+    rig = Rig(conn, cfg=cfg)
+    rig.list(token(), sells=2_000_000)  # selling the position quotes $2.00 before costs
+    rig.step()
+    fee = 0.0002 * 150.0  # $0.03 a leg
+    row = rig.snipes().iloc[0]
+    assert row["entry_usdc"] == pytest.approx(2.0 + fee) and row["fee_usd"] == pytest.approx(fee)
+    assert db.sniper_free_usdc(conn, 10.0) == pytest.approx(10.0 - 2.0 - fee)
+    rig.step()
+    assert rig.snipes().iloc[0]["last_value"] == pytest.approx(2.0 * (1 - cfg.sniper_latency_slippage) - fee)
+
+
+def test_no_entries_while_there_is_no_sol_price_to_charge_fees_at(conn):
+    rig = Rig(conn, cfg=replace(CFG, sniper_tx_fee_sol=0.0001))
+    rig.list(token())
+    rig.step()
+    assert rig.snipes().empty and rig.http.quote_calls == 0
+
+
+def test_learned_limits_change_what_the_sniper_buys(conn):
+    from tests.test_sniper_learn import seed
+
+    seed(conn)  # 40 closed winners with $20,000 liquidity, 40 losers with $4,000
+    rig = Rig(conn)
+    rig.list(token("Shallow", liquidity=4_500.0, holders=40), token("Deep", liquidity=25_000.0, holders=40))
+    rig.step()
+    assert set(rig.snipes()["mint"]) - {f"M{i}" for i in range(80)} == {"Deep"}
 
 
 def test_symbols_are_sanitised_before_they_reach_logs_and_the_database():

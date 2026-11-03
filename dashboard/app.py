@@ -1,4 +1,5 @@
 import html
+import json
 import sys
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -169,20 +170,45 @@ def sniper_realised_over_time(snipes: pd.DataFrame, times: pd.Series, unrealised
     return out
 
 
-def sniper_section(snipes: pd.DataFrame, active: bool, totals: dict) -> None:
+LEARNED = {  # how each filter the sniper can tighten reads on the page
+    "liquidity_usd": "liquidity >= ${:,.0f}", "holders": "holders >= {:g}", "top_holders_pct": "top holders <= {:g}%",
+    "dev_mints": "dev mints <= {:g}", "age_min": "age <= {:g} min", "impact": "price impact <= {:.1%}",
+}
+
+
+def learning_text(raw: str | None) -> str:
+    """One line on what the sniper has learned from its closed snipes (state written by bot.sniper_learn)."""
+    try:
+        state = json.loads(raw) if raw else {}
+    except ValueError:
+        state = {}
+    closed, learned = state.get("closed", 0), state.get("limits", {})
+    if learned:
+        parts = ", ".join(LEARNED[k].format(v) for k, v in learned.items() if k in LEARNED)
+        return f"Learned from {closed} closed snipes: {parts}."
+    return (
+        f"Learning from {closed} closed snipes: no stricter filter has proven itself yet. One is adopted only when 30+ "
+        "snipes that pass it earn more than chance explains."
+    )
+
+
+def sniper_section(snipes: pd.DataFrame, active: bool, totals: dict, learning: str = "") -> None:
     st.subheader("Memecoin sniper (simulated)")
     if not active:
         st.caption("Off. Turn on RISKY to start sniping brand-new tokens in simulation. It never touches the wallet.")
         return
     st.caption(
         "Real Jupiter quotes, simulated money: a separate bankroll that never touches the wallet, counted in the totals above. "
-        "Entries and exits include a 2% latency haircut per leg."
+        f"Entries and exits include a {settings.sniper_latency_slippage:.0%} latency haircut and a "
+        f"{settings.sniper_tx_fee_sol:g} SOL network fee per leg."
     )
     win_rate = f"{totals['wins'] / totals['closed']:.0%}" if totals["closed"] else "n/a"
     st.caption(
         f"{totals['open']} open, {totals['closed']} closed, win rate {win_rate}, realised {signed_usd(totals['realised'])}, "
         f"unrealised {signed_usd(totals['unrealised'])}, bankroll free ${totals['free']:,.2f}"
     )
+    if learning:
+        st.caption(learning)
     closed = snipes[snipes["status"] == "closed"]
     opened = snipes[snipes["status"] == "open"]
     now = datetime.now(timezone.utc)
@@ -230,6 +256,7 @@ def live_view() -> None:
         latest = db.latest_balance(conn)
         snipes = db.read_snipes(conn)
         ml_scores, ml_info = db.get_ml(conn)
+        sniper_learning = db.get_state(conn, db.SNIPER_LEARN)
         risk_off = db.get_state(conn, db.RISK_OFF) or ""
 
     dry_run = settings.dry_run if mode_flag is None else mode_flag == "1"
@@ -397,7 +424,7 @@ def live_view() -> None:
             st.caption(f"Equity ${now_equity:,.2f} | {floor_text}")
 
     if settings.sniper and (dry_run or not snipes.empty):
-        sniper_section(snipes, sniper_active, sn)
+        sniper_section(snipes, sniper_active, sn, learning_text(sniper_learning))
 
     st.subheader("Trade log")
     if trades.empty:

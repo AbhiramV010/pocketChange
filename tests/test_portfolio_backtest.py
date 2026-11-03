@@ -137,6 +137,20 @@ def test_parity_holds_for_the_plain_crossover_too(conn):
     same_fills(live, simulate(data, plain, max_positions=3).fills)
 
 
+def test_parity_holds_when_a_missed_cross_is_taken_late(conn):
+    """Crosses the BTC filter or the one open slot kept us out of are taken later, live exactly as in the backtest."""
+    from bot.strategy import Signal, sma_signal
+
+    data = {"SOL": walk(600, 23, 0.0004), "BTC": walk(600, 24, 0.0002), "ETH": walk(600, 25, 0.0003, vol=0.01)}
+    p = replace(FULL, entry="cross", edge_bps=0.0, confirm=True, reentry_candles=0, regime_len=50)
+    bt = simulate(data, p, max_positions=1, trade_usdc=5.0, start_cash=20.0)
+    idx = data["SOL"].index
+    late = [t for t, side, a, _, _ in bt.fills if side == "buy"
+            and sma_signal(data[a]["close"].to_numpy(float)[: idx.get_loc(t)], p) is not Signal.BUY]
+    assert len(late) >= 3  # a real test: buys whose decision candle was not itself a cross
+    same_fills(live_fills(conn, data, p, max_positions=1), bt.fills)
+
+
 def test_decisions_never_see_the_future():
     data = {"SOL": walk(300, 6, 0.0005), "BTC": walk(300, 7, 0.0003)}
     base = simulate(data, FULL)

@@ -106,6 +106,18 @@ def test_the_sniper_is_folded_into_the_top_equity_bar(app):
     assert "never touches the wallet" in captions
 
 
+def test_the_sniper_section_says_what_it_has_learned(app):
+    seed(app)
+    seed_snipes(app)
+    at = run_app()
+    assert any("Learning from 0 closed snipes: no stricter filter has proven itself yet" in c.value for c in at.caption)
+    conn = db.connect(app)
+    db.set_state(conn, db.SNIPER_LEARN, '{"limits": {"liquidity_usd": 5000, "impact": 0.01}, "closed": 64, "wins": 21}')
+    captions = " ".join(c.value for c in run_app().caption)
+    assert "Learned from 64 closed snipes: liquidity >= $5,000, price impact <= 1.0%." in captions
+    assert "0.0001 SOL network fee per leg" in captions
+
+
 def test_the_curve_caption_keeps_the_halt_floor_about_the_wallet_only(app):
     seed(app)
     seed_snipes(app)

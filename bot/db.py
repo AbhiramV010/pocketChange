@@ -80,6 +80,7 @@ MIGRATIONS = (  # columns added after the first release: (table, column, definit
     ("snipes", "age_min", "REAL"),
     ("snipes", "impact", "REAL"),
     ("snipes", "round_trip", "REAL"),
+    ("snipes", "fee_usd", "REAL"),  # one leg's simulated network fee: paid on entry (in entry_usdc) and on exit
 )
 
 PAUSED = "paused"
@@ -437,15 +438,15 @@ def open_snipe(
     conn: sqlite3.Connection, *, mint: str, symbol: str, decimals: int, entry_usdc: float, qty_raw: int,
     liquidity_usd: float | None, timestamp: str | None = None, holders: int | None = None,
     top_holders_pct: float | None = None, dev_mints: int | None = None, age_min: float | None = None,
-    impact: float | None = None, round_trip: float | None = None,
+    impact: float | None = None, round_trip: float | None = None, fee_usd: float = 0.0,
 ) -> None:
     with conn:
         conn.execute(
             "INSERT INTO snipes (mint, symbol, decimals, opened_at, entry_usdc, qty_raw, liquidity_usd, status, "
-            "holders, top_holders_pct, dev_mints, age_min, impact, round_trip) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)",
+            "holders, top_holders_pct, dev_mints, age_min, impact, round_trip, fee_usd) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?)",
             (mint, symbol, decimals, timestamp or utc_now_iso(), entry_usdc, qty_raw, liquidity_usd,
-             holders, top_holders_pct, dev_mints, age_min, impact, round_trip),
+             holders, top_holders_pct, dev_mints, age_min, impact, round_trip, fee_usd),
         )
 
 

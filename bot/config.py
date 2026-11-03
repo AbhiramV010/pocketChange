@@ -143,6 +143,7 @@ class Settings:
     sniper_max_hold_min: float = 30.0
     sniper_interval_seconds: float = 30.0
     sniper_latency_slippage: float = 0.02  # assumed extra cost of being late on both legs
+    sniper_tx_fee_sol: float = 0.0001  # simulated network fee per leg (base + priority), charged at the SOL price
     jupiter_tokens_url: str = "https://lite-api.jup.ag/tokens/v2"
     ml_horizon: int = 6  # candles ahead the AI looks
     ml_target_pct: float = 0.4  # a move must beat this many percent to count as a win (costs are inside it)
@@ -187,6 +188,7 @@ class Settings:
         need(0 < self.sniper_take_profit and 0 < self.sniper_stop_loss < 1, "SNIPER_TAKE_PROFIT > 0 and 0 < SNIPER_STOP_LOSS < 1")
         need(self.sniper_interval_seconds >= 5, "SNIPER_INTERVAL_SECONDS must be >= 5")
         need(0 <= self.sniper_latency_slippage < 0.5, "SNIPER_LATENCY_SLIPPAGE must be in [0, 0.5)")
+        need(0 <= self.sniper_tx_fee_sol < 0.05, "SNIPER_TX_FEE_SOL must be in [0, 0.05)")
         need(self.jupiter_tokens_url.startswith("https://"), "JUPITER_TOKENS_URL must be an https URL")
         need(1 <= self.ml_horizon <= 200, "ML_HORIZON must be in 1..200")
         need(0 <= self.ml_target_pct < 20, "ML_TARGET_PCT must be in [0, 20)")
@@ -248,6 +250,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         sniper_max_hold_min=_number(env, "SNIPER_MAX_HOLD_MIN", defaults.sniper_max_hold_min),
         sniper_interval_seconds=_number(env, "SNIPER_INTERVAL_SECONDS", defaults.sniper_interval_seconds),
         sniper_latency_slippage=_number(env, "SNIPER_LATENCY_SLIPPAGE", defaults.sniper_latency_slippage),
+        sniper_tx_fee_sol=_number(env, "SNIPER_TX_FEE_SOL", defaults.sniper_tx_fee_sol),
         jupiter_tokens_url=(_raw(env, "JUPITER_TOKENS_URL") or defaults.jupiter_tokens_url).rstrip("/"),
         ml_horizon=_number(env, "ML_HORIZON", defaults.ml_horizon, int),
         ml_target_pct=_number(env, "ML_TARGET_PCT", defaults.ml_target_pct),

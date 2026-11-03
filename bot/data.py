@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -20,12 +21,18 @@ CANDLE = pd.Timedelta(CANDLE_FREQ)
 
 def candle_delta(timeframe: str) -> pd.Timedelta:
     return pd.Timedelta(candle_freq(timeframe))
+
+
 PAGE_LIMIT = 1000
 MAX_PAGES = 200
 # Tried in order after the configured exchange. All list SOL/USDC.
 FALLBACK_EXCHANGES = ("binance", "bybit", "okx", "kraken")
+# A source that failed for a market is tried last for this long. Binance and Bybit refuse US connections: without
+# this, every cycle sent two doomed requests (and logged two warnings) per coin before reaching one that answers.
+FAIL_COOLDOWN_S = 30 * 60
 
 _exchanges: dict[str, ccxt.Exchange] = {}
+_failed_at: dict[tuple[str, str], float] = {}  # (exchange, symbol) -> monotonic time of its last failure
 FETCH_LOCK = threading.Lock()  # the trading loop and the AI's background retraining share one ccxt client
 
 
@@ -39,9 +46,13 @@ def _exchange(exchange_id: str) -> ccxt.Exchange:
     return _exchanges[exchange_id]
 
 
-def _exchange_order(preferred: str | None) -> list[str]:
+def _exchange_order(preferred: str | None, symbol: str = SYMBOL) -> list[str]:
+    """The configured source first, then the fallbacks; any that failed for this market recently go last."""
     first = (preferred or settings.candle_exchange).lower()
-    return [first] + [e for e in FALLBACK_EXCHANGES if e != first]
+    order = [first] + [e for e in FALLBACK_EXCHANGES if e != first]
+    now = time.monotonic()
+    cooling = [e for e in order if now - _failed_at.get((e, symbol), -math.inf) < FAIL_COOLDOWN_S]
+    return [e for e in order if e not in cooling] + cooling
 
 
 def to_frame(rows: list[list[float]]) -> pd.DataFrame:
@@ -78,14 +89,18 @@ def _download_with_fallback(
     since: datetime, preferred: str | None, timeframe: str = TIMEFRAME, symbol: str = SYMBOL
 ) -> pd.DataFrame:
     errors = []
-    for exchange_id in _exchange_order(preferred):
+    for exchange_id in _exchange_order(preferred, symbol):
         try:
             df = download(since, exchange_id, timeframe=timeframe, symbol=symbol)
+            _failed_at.pop((exchange_id, symbol), None)
             log.debug("candles: %d rows from %s", len(df), exchange_id)
             return df
         except Exception as exc:  # network, rate limit, geo-block, unknown market
             errors.append(f"{exchange_id}: {type(exc).__name__}: {str(exc)[:80]}")
-            log.warning("candle source %s failed: %s", exchange_id, errors[-1])
+            if (exchange_id, symbol) not in _failed_at:  # say it once, not every cycle while it stays down
+                log.warning("candle source %s failed for %s (tried last for %d min): %s", exchange_id, symbol,
+                            FAIL_COOLDOWN_S // 60, errors[-1])
+            _failed_at[(exchange_id, symbol)] = time.monotonic()
     raise DataError("all candle sources failed: " + "; ".join(errors))
 
 

@@ -187,17 +187,21 @@ def test_swap_errors_are_per_asset_and_retried_once(conn):
     assert {a for s, a in m.broker.swaps if s == "buy"} == {"SOL", "ETH"}  # the others still filled
 
 
-def test_the_sniper_runs_after_each_cycle_and_can_never_break_it(conn):
-    from bot.run import run_loop
+def test_a_failing_sniper_step_never_stops_the_sniper_thread():
+    import threading
+
+    from bot.run import run_sniper
+
+    stop = threading.Event()
 
     class Boom:
         calls = 0
 
         def step(self):
             Boom.calls += 1
+            if Boom.calls == 2:
+                stop.set()
             raise RuntimeError("sniper bug")
 
-    m = Market(conn, {"SOL": series(0.004), "BTC": series(0.004), "ETH": series(0.0)})
-    m.ctx.sniper = Boom()
-    run_loop(m.ctx, once=True)
-    assert Boom.calls == 1 and ("buy", "SOL") in m.broker.swaps  # the main strategy traded regardless
+    run_sniper(BASE, sniper=Boom(), stop=stop)  # on its own thread in the bot; the trading loop never calls it
+    assert Boom.calls == 2  # the first failure was logged and the loop carried on

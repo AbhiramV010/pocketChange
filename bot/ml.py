@@ -4,8 +4,8 @@ For every coin and closed candle it estimates the probability that buying now an
 keeps more than `target_pct` percent after round-trip fees and slippage. The bot buys when that probability is high,
 sells when it fades, and keeps every other safety rule (stops, caps, equity floor, STOP button) untouched.
 
-    python -m bot.ml train --days 400 --timeframe 1h     # fit on all history and save the model
-    python -m bot.ml eval  --days 400 --timeframe 1h     # walk-forward test on months the model never saw
+    python -m bot.ml train --days 400 --timeframe 4h     # fit on all history and save the model
+    python -m bot.ml eval  --days 400 --timeframe 4h     # walk-forward test on months the model never saw
     python -m bot.portfolio_backtest --ml                # what those out-of-sample calls would have earned
 """
 from __future__ import annotations
@@ -24,7 +24,7 @@ import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import roc_auc_score
 
-from bot.config import DATA_DIR, ROUND_TRIP_COST, Settings, candle_freq
+from bot.config import DATA_DIR, ROUND_TRIP_COST, TIMEFRAME, Settings, candle_freq
 from bot.strategy import Params, Signal, gate_entry, stop_hit
 
 log = logging.getLogger("bot.ml")
@@ -342,7 +342,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=["train", "eval"])
     parser.add_argument("--days", type=int, default=settings.ml_train_days)
-    parser.add_argument("--timeframe", default="1h")
+    parser.add_argument("--timeframe", default=TIMEFRAME, help="candle size (default: TIMEFRAME, what the bot trades)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     frames = fetch_frames(settings, args.timeframe, args.days)

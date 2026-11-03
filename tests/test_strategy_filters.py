@@ -51,6 +51,42 @@ def test_cross_mode_buys_once_when_fast_crosses_the_edge_line():
     assert signals.index(Signal.BUY) > first  # the edge line is crossed a few candles after slow
 
 
+CROSS = Params(fast=5, slow=20, entry="cross", edge_bps=0.0, confirm=False, stop_atr=0.0, hard_stop_pct=0.0)
+
+
+def flat_core(close, **state):
+    from bot.strategy import decide_core
+
+    return decide_core(close, close, close, CROSS, holding=False, **state)
+
+
+def turn_up():
+    """A decline, then a rally: one clean crossover. Returns the closes and the index of the cross candle."""
+    closes = np.concatenate([np.linspace(110, 100, 60), np.linspace(100, 115, 60)])
+    cross = next(i for i in range(25, len(closes)) if sma_signal(closes[: i + 1], CROSS) is Signal.BUY)
+    return closes, cross
+
+
+def test_a_cross_the_btc_filter_blocked_is_taken_once_it_clears():
+    closes, k = turn_up()
+    assert flat_core(closes[: k + 1], risk_on=False) is Signal.HOLD  # risk-off on the cross candle itself
+    assert sma_signal(closes[: k + 4], CROSS) is Signal.HOLD  # three candles later the plain rule has moved on
+    assert flat_core(closes[: k + 4]) is Signal.BUY  # ... but the cross was never taken: take it now
+
+
+def test_a_missed_cross_is_not_taken_after_a_sell_or_once_it_is_stale():
+    closes, k = turn_up()
+    assert flat_core(closes[: k + 4], bars_since_sell=2) is Signal.HOLD  # sold since the cross: one entry per cross
+    assert flat_core(closes[: k + 4], bars_since_sell=4) is Signal.BUY  # that sale came before the cross
+    assert flat_core(closes[: k + CROSS.slow + 2]) is Signal.HOLD  # more than `slow` candles ago
+
+
+def test_a_missed_cross_is_dropped_once_the_trend_breaks():
+    closes, k = turn_up()
+    broken = np.concatenate([closes[: k + 3], np.full(12, closes[k] * 0.9)])  # fast falls back under slow
+    assert flat_core(broken) is Signal.HOLD
+
+
 def test_atr_and_hard_stop():
     f = frame(rising(30), spread=1.0)
     assert atr(f["high"].to_numpy(), f["low"].to_numpy(), f["close"].to_numpy()) == pytest.approx(2.0)

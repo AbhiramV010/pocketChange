@@ -321,7 +321,7 @@ class ChainClient:
         last_valid = int(built["lastValidBlockHeight"])
         self._check_message(tx)
         signed = self._sign(tx)
-        self._check_simulation(signed, side, quote, before, ref_price, asset)
+        self._check_simulation(signed, side, quote, before, self._sol_usd(asset, ref_price), asset)
         signature = str(signed.signatures[0])
         self._send_and_confirm(signed, signature, last_valid)
 
@@ -345,13 +345,22 @@ class ChainClient:
     def _sign(self, tx: VersionedTransaction) -> VersionedTransaction:
         return VersionedTransaction(tx.message, [self._keypair])
 
+    def _sol_usd(self, asset: str, ref_price: float) -> float:
+        """SOL's price in USD, to value the network fee and any account rent, which are paid in SOL.
+
+        `ref_price` is the traded coin's price, so it is SOL's only when trading SOL. Valuing a BTC swap's fee at the
+        BTC price would put a 0.00001 SOL fee at $0.80 and refuse every BTC swap; for other coins ask Jupiter."""
+        if asset == "SOL":
+            return ref_price
+        return self.quote(SELL, to_raw(0.1, SOL_DECIMALS), "SOL").price
+
     def _check_simulation(
         self,
         tx: VersionedTransaction,
         side: str,
         quote: Quote,
         before: Snapshot,
-        ref_price: float,
+        sol_usd: float,
         asset: str = "SOL",
     ) -> None:
         result = self._rpc(
@@ -377,7 +386,7 @@ class ChainClient:
             raise SwapFailed(f"simulation spends {spent}, more than the requested {quote.amount_in_raw}")
         if got < min(quote.min_out_raw, min_amount_out(quote.amount_out_raw, self._cfg.max_slippage_bps)):
             raise SwapFailed(f"simulation returns {got}, below the slippage floor")
-        cost_usd = max(sol_cost, 0) / 10**SOL_DECIMALS * ref_price
+        cost_usd = max(sol_cost, 0) / 10**SOL_DECIMALS * sol_usd
         if cost_usd > self._cfg.max_fee_usd:
             raise SwapFailed(f"swap would cost ${cost_usd:.3f} in SOL fees/rent, above MAX_FEE_USD={self._cfg.max_fee_usd}")
 
