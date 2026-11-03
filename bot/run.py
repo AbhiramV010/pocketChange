@@ -19,7 +19,7 @@ import pandas as pd
 
 from bot import chain, data, db, ml
 from bot.assets import ASSETS, PRIMARY, label
-from bot.config import FEE_RATE, MIN_TRADE_USDC, SLIPPAGE_RATE, TIMEFRAME, Settings, settings
+from bot.config import FEE_RATE, MIN_TRADE_USDC, PROVEN_TIMEFRAME, SLIPPAGE_RATE, TIMEFRAME, Settings, settings
 from bot.db import Balances, Fill
 from bot.strategy import Params, Signal, bars_since, buy_budget, dca_signal, decide, momentum, regime_ok, size_trade
 
@@ -29,7 +29,6 @@ MAX_SWAP_RETRIES = 1  # hard rule: a failed swap is retried at most once per cyc
 MAX_ATTEMPT_CYCLES = 3  # cycles that may try the same signal before giving up on it
 MAX_SELL_CHUNKS = 10  # capped swaps one exit may take in a cycle; anything left continues next cycle
 REGIME_ASSET = "BTC"  # the market filter looks at BTC
-PROVEN_TIMEFRAME = "4h"  # the only candle size whose backtests beat fees (README "Results")
 ALREADY_RUNNING_EXIT = 3  # exit code when another bot holds the instance lock
 
 
@@ -452,6 +451,8 @@ def _learned_enter(conn, timeframe: str, default: float, horizon: int) -> float:
 
 
 def _open_positions(balances: Balances, prices: dict[str, float]) -> int:
+    """Positions worth at least MIN_TRADE_USDC. Pass last known marks for coins without a price this cycle, or a
+    holding whose feed is stale would not count and one buy too many could go through."""
     return sum(1 for a, q in balances.positions().items() if q * prices.get(a, 0.0) >= MIN_TRADE_USDC)
 
 
@@ -483,7 +484,7 @@ def _trade_if_signal(
         log.info("%s %s signal, nothing to trade (usdc=%.2f qty=%.6g)", name, signal.value, balances.usdc, held)
         db.set_state(conn, done_key, key)
         return None
-    if signal is Signal.BUY and _open_positions(balances, prices) >= cfg.max_positions:
+    if signal is Signal.BUY and _open_positions(balances, {**db.last_marks(conn), **prices}) >= cfg.max_positions:
         log.info("%s buy signal skipped: already holding MAX_POSITIONS=%d", name, cfg.max_positions)
         return None
     if balances.sol < cfg.gas_reserve_sol:

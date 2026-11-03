@@ -23,6 +23,17 @@ def test_env_file_created_from_example(tmp_path, monkeypatch):
     assert (tmp_path / ".env").read_text() == "DRY_RUN=false\n"
 
 
+def test_the_dashboard_is_optional(tmp_path):
+    from dataclasses import replace
+
+    from bot.config import load_settings
+
+    cfg = replace(load_settings({}), db_path=tmp_path / "x.db")
+    both = launch.build_services("python", cfg, 8501)
+    assert [s.name for s in both] == ["bot", "dashboard"] and "8501" in both[1].cmd
+    assert [s.name for s in launch.build_services("python", cfg, 8501, dashboard=False)] == ["bot"]
+
+
 def test_restart_budget_is_limited():
     svc = launch.Service("bot", ["x"])
     assert all(svc.may_restart() for _ in range(launch.MAX_RESTARTS))

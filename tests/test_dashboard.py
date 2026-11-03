@@ -80,6 +80,15 @@ def test_says_why_nothing_is_bought_while_the_btc_filter_is_off(app):
     assert not run_app().info  # paused has its own control; one message at a time
 
 
+def test_a_timeframe_below_4h_carries_a_warning(app):
+    seed(app)
+    conn = db.connect(app)
+    db.set_timeframe(conn, "15m")
+    assert any("Trading on 15m candles" in w.value for w in run_app().warning)
+    db.set_timeframe(conn, "4h")
+    assert not any("Trading on" in w.value for w in run_app().warning)
+
+
 def test_halted_shows_red_banner_and_cannot_be_cleared(app):
     seed(app, halted=True)
     at = run_app()

@@ -62,6 +62,7 @@ if not 0 <= RISK_PCT <= 10:
 if TIMEFRAME not in TIMEFRAMES:
     raise ConfigError(f"TIMEFRAME must be one of {TIMEFRAMES}, got {TIMEFRAME!r}")
 DASHBOARD_TIMEFRAMES = ("1m", "5m", "15m", "30m", "1h", "4h")  # choices on the dashboard switch
+PROVEN_TIMEFRAME = "4h"  # the only candle size whose backtests beat fees (README "Results")
 
 
 def candle_freq(timeframe: str) -> str:

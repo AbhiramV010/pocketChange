@@ -14,7 +14,7 @@ import streamlit as st  # noqa: E402
 
 from bot import db  # noqa: E402
 from bot.assets import ASSETS, label  # noqa: E402
-from bot.config import DASHBOARD_TIMEFRAMES, TIMEFRAME, settings  # noqa: E402
+from bot.config import DASHBOARD_TIMEFRAMES, PROVEN_TIMEFRAME, TIMEFRAME, settings  # noqa: E402
 
 PUBLIC = settings.dashboard_public
 REFRESH = "5s"
@@ -310,6 +310,12 @@ def live_view() -> None:
         help="Candle size the bot trades on. Shorter means more trades and more fees: in backtests every setting "
         "below 4h lost money after costs.",
     )
+    if timeframe != PROVEN_TIMEFRAME:
+        st.warning(
+            f"Trading on {timeframe} candles. In backtests every timeframe below {PROVEN_TIMEFRAME} lost money after "
+            f"fees, and the shorter, the worse. {PROVEN_TIMEFRAME} is the tested setting.",
+            icon=":material/warning:",
+        )
     st.divider()
     if risk_off and not (halted or paused):
         st.info(

@@ -262,6 +262,21 @@ def supervise(services: list[Service]) -> int:
             svc.start()
 
 
+def build_services(py: str, cfg, port: int, dashboard: bool = True) -> list[Service]:
+    """The bot, and the dashboard unless it is turned off (a Pi or a server that only needs the bot)."""
+    bot = Service("bot", [py, "-m", "bot.run"], stop_grace=BOT_STOP_GRACE_S)  # bot.run writes data/bot.log itself
+    if not dashboard:
+        return [bot]
+    ui = Service(
+        "dashboard",
+        [py, "-m", "streamlit", "run", str(ROOT / "dashboard" / "app.py"),
+         "--server.headless", "true", "--server.address", "127.0.0.1", "--server.port", str(port),
+         "--browser.gatherUsageStats", "false"],
+        log_file=cfg.db_path.parent / "dashboard.log",
+    )
+    return [bot, ui]
+
+
 def run(args: argparse.Namespace) -> int:
     ensure_env_file()
     cfg = load_settings()
@@ -273,31 +288,23 @@ def run(args: argparse.Namespace) -> int:
     init_database(cfg)
     port = free_port(args.port)
     if args.check:
-        say(f"pre-flight OK; the dashboard would use port {port}")
+        say("pre-flight OK" + ("" if args.no_dashboard else f"; the dashboard would use port {port}"))
         return 0
 
     cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
-    py = sys.executable
-    bot = Service("bot", [py, "-m", "bot.run"], stop_grace=BOT_STOP_GRACE_S)  # bot.run writes data/bot.log itself
-    ui = Service(
-        "dashboard",
-        [py, "-m", "streamlit", "run", str(ROOT / "dashboard" / "app.py"),
-         "--server.headless", "true", "--server.address", "127.0.0.1", "--server.port", str(port),
-         "--browser.gatherUsageStats", "false"],
-        log_file=cfg.db_path.parent / "dashboard.log",
-    )
-    services = [bot, ui]
+    services = build_services(sys.executable, cfg, port, dashboard=not args.no_dashboard)
     try:
-        bot.start()
-        ui.start()
-        url = f"http://localhost:{port}"
-        if wait_for_dashboard(port, ui):
-            say(f"dashboard ready: {url}")
-            if not args.no_browser:
-                webbrowser.open(url)
-        else:
-            say(f"WARNING: dashboard did not answer within {HEALTH_TIMEOUT_S}s; see data/dashboard.log")
-        say("running. Press Ctrl+C to stop the bot and the dashboard.")
+        for svc in services:
+            svc.start()
+        if len(services) > 1:
+            url = f"http://localhost:{port}"
+            if wait_for_dashboard(port, services[1]):
+                say(f"dashboard ready: {url}")
+                if not args.no_browser:
+                    webbrowser.open(url)
+            else:
+                say(f"WARNING: dashboard did not answer within {HEALTH_TIMEOUT_S}s; see data/dashboard.log")
+        say("running. Press Ctrl+C to stop." if len(services) == 1 else "running. Press Ctrl+C to stop the bot and the dashboard.")
         return supervise(services)
     except KeyboardInterrupt:
         say("stopping ...")
@@ -321,6 +328,7 @@ def main(argv: list[str] | None = None) -> None:
     argv = sys.argv[1:] if argv is None else argv
     parser = argparse.ArgumentParser(description="Start the pocketchange bot and dashboard.")
     parser.add_argument("--no-browser", action="store_true", help="do not open the dashboard in a browser")
+    parser.add_argument("--no-dashboard", action="store_true", help="run only the bot (a Pi or server; saves memory)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="dashboard port (first free from here)")
     parser.add_argument("--check", action="store_true", help="pre-flight checks only; start nothing")
     parser.add_argument("--yes", action="store_true", help="skip the live-mode confirmation prompt")

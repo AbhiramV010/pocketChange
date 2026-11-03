@@ -118,6 +118,15 @@ def test_regime_filter_says_when_btc_history_is_too_short(conn):
     assert m.broker.swaps == [] and "only 20 of the 30 BTC candles" in db.get_state(conn, db.RISK_OFF)
 
 
+def test_a_holding_with_a_stale_feed_still_counts_toward_max_positions(conn):
+    db.insert_trade(conn, "buy", db.Fill(5.0, 0.0001, 50_000.0, None), True, asset="BTC", timestamp=SETUP)
+    db.insert_balance(conn, db.Balances(15.0, 0.05, 0.0, {"BTC": 0.0001}), 100.0, True, prices={"BTC": 50_000.0})
+    m = Market(conn, {"SOL": series(0.0), "BTC": series(0.0), "ETH": series(0.004)}, cfg=replace(BASE, max_positions=1))
+    m.errors["BTC"] = RuntimeError("feed down")  # BTC has no price this cycle; its last mark says $5 is held
+    m.cycle()
+    assert m.broker.swaps == []  # the one slot is taken by BTC: no ETH buy
+
+
 def test_regime_never_blocks_an_exit(conn):
     db.insert_trade(conn, "buy", db.Fill(5.0, 0.05, 100.0, None), True, asset="ETH", timestamp=SETUP)
     params = replace(TREND, regime_len=30)
