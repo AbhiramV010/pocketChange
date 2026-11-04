@@ -3,7 +3,9 @@ import json
 from dataclasses import replace
 
 import pytest
+from solders.compute_budget import set_compute_unit_limit, set_compute_unit_price
 from solders.hash import Hash
+from solders.instruction import AccountMeta, Instruction
 from solders.keypair import Keypair
 from solders.message import MessageV0
 from solders.signature import Signature
@@ -31,9 +33,19 @@ def token_account(amount: int | None):
     return {"data": [base64.b64encode(data).decode(), "base64"], "lamports": 2_039_280}
 
 
-def unsigned_tx(payer) -> str:
-    ix = transfer(TransferParams(from_pubkey=payer, to_pubkey=Keypair().pubkey(), lamports=1))
-    msg = MessageV0.try_compile(payer, [ix], [], Hash.default())
+def jupiter_ixs(payer, units=300_000, micro_lamports=100_000) -> list[Instruction]:
+    """The shape of a real Jupiter swap: compute budget, an idempotent output-account create, the route."""
+    me = [AccountMeta(payer, is_signer=True, is_writable=True)]
+    return [
+        set_compute_unit_limit(units),
+        set_compute_unit_price(micro_lamports),
+        Instruction(chain.ATA_PROGRAM, bytes([1]), me),
+        Instruction(chain.JUPITER_PROGRAM, bytes.fromhex("e517cb977ae3ad2a"), me),
+    ]
+
+
+def unsigned_tx(payer, ixs: list[Instruction] | None = None) -> str:
+    msg = MessageV0.try_compile(payer, jupiter_ixs(payer) if ixs is None else ixs, [], Hash.default())
     return base64.b64encode(bytes(VersionedTransaction.populate(msg, [Signature.default()]))).decode()
 
 
@@ -331,6 +343,63 @@ def test_unexpected_fee_payer_is_refused(client):
     with pytest.raises(SwapFailed, match="fee payer"):
         client.swap(BUY, 1.0, PRICE)
     assert "simulateTransaction" not in net.calls
+
+
+def swap_returning(net, ixs_for):
+    """Jupiter answering the swap call with a transaction built from `ixs_for(owner)`."""
+
+    def jupiter(path, params=None, body=None):
+        res = net.jupiter(path, params, body)
+        if path == "swap":
+            res["swapTransaction"] = unsigned_tx(net.client.owner, ixs_for(net.client.owner))
+        return res
+
+    return jupiter
+
+
+def approve_delegate(me):  # a token Approve moves no balance, so only the program check catches it
+    accounts = [
+        AccountMeta(chain.ata(me, chain.USDC_MINT), False, True), AccountMeta(Keypair().pubkey(), False, False),
+        AccountMeta(me, True, False),
+    ]
+    return Instruction(chain.TOKEN_PROGRAM, bytes([4]) + (10**12).to_bytes(8, "little"), accounts)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        lambda me: transfer(TransferParams(from_pubkey=me, to_pubkey=Keypair().pubkey(), lamports=1)),
+        approve_delegate,
+    ],
+)
+def test_transactions_calling_other_programs_are_refused(client, extra):
+    net = wire(client)
+    fair_buy(net)
+    client._jupiter = swap_returning(net, lambda me: jupiter_ixs(me) + [extra(me)])
+    with pytest.raises(SwapFailed, match="unexpected program"):
+        client.swap(BUY, 1.0, PRICE)
+    assert "simulateTransaction" not in net.calls
+
+
+def test_a_priority_fee_above_the_ceiling_is_refused(client):
+    net = wire(client)
+    fair_buy(net)
+    client._jupiter = swap_returning(net, lambda me: jupiter_ixs(me, units=1_400_000, micro_lamports=1_000_000))
+    with pytest.raises(SwapFailed, match="priority fee"):
+        client.swap(BUY, 1.0, PRICE)
+    assert "simulateTransaction" not in net.calls
+
+
+def test_priority_fee_follows_the_runtime_rules():
+    me = KEY.pubkey()
+
+    def fee(ixs):
+        return chain.priority_fee_lamports(MessageV0.try_compile(me, ixs, [], Hash.default()))
+
+    route = jupiter_ixs(me)[2:]
+    assert fee(jupiter_ixs(me, units=1_400_000, micro_lamports=142_857)) == 200_000  # live Jupiter at 200k, rounded up
+    assert fee(route) == 0  # no price, no priority fee
+    assert fee([set_compute_unit_price(1_000_000)] + route) == 400_000  # no limit: 200k units per other instruction
 
 
 def test_preflight_rejection_is_retry_safe(client):

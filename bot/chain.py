@@ -30,10 +30,18 @@ USDC_MINT = Pubkey.from_string("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")  
 WSOL_MINT = Pubkey.from_string("So11111111111111111111111111111111111111112")  # wrapped SOL (native mint)
 TOKEN_PROGRAM = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 ATA_PROGRAM = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
+COMPUTE_BUDGET_PROGRAM = Pubkey.from_string("ComputeBudget111111111111111111111111111111")
+JUPITER_PROGRAM = Pubkey.from_string("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4")  # Jupiter v6 aggregator
+# Every program a Jupiter swap (wrapAndUnwrapSol=False) calls at the top level, as live responses show: compute
+# budget, an idempotent create of the output token account, the route. Anything else is refused: a token Approve or
+# SetAuthority hands the wallet over without moving a balance the simulation could catch.
+SWAP_PROGRAMS = frozenset({COMPUTE_BUDGET_PROGRAM, ATA_PROGRAM, JUPITER_PROGRAM})
 USDC_DECIMALS, SOL_DECIMALS = 6, 9
 
 CONFIRM_TIMEOUT_S = 120  # longer than a blockhash lives (~60-90s), so we normally see landed or expired
 MAX_PRIORITY_LAMPORTS = 200_000  # priority fee ceiling handed to Jupiter (0.0002 SOL)
+PRIORITY_SLACK = 1.1  # Jupiter's rounding may land a little over the ceiling it was given
+DEFAULT_UNITS_PER_IX, MAX_COMPUTE_UNITS = 200_000, 1_400_000  # the runtime's limit when none is set
 HTTP_TIMEOUT_S = 20
 
 BUY, SELL = "buy", "sell"
@@ -103,6 +111,25 @@ def token_amount(account: dict | None) -> int:
         return 0
     data = base64.b64decode(account["data"][0])
     return int.from_bytes(data[64:72], "little")  # layout: mint(32) owner(32) amount(u64)
+
+
+def priority_fee_lamports(msg) -> int:
+    """Priority fee a message pays: its compute-unit price (micro-lamports) times its compute-unit limit."""
+    limit = price = None
+    others = 0
+    for ix in msg.instructions:
+        if msg.account_keys[ix.program_id_index] != COMPUTE_BUDGET_PROGRAM:
+            others += 1
+            continue
+        data = bytes(ix.data)
+        if data[:1] == b"\x02" and len(data) >= 5:  # SetComputeUnitLimit(u32)
+            limit = int.from_bytes(data[1:5], "little")
+        elif data[:1] == b"\x03" and len(data) >= 9:  # SetComputeUnitPrice(u64)
+            price = int.from_bytes(data[1:9], "little")
+    if not price:
+        return 0
+    units = min(DEFAULT_UNITS_PER_IX * others if limit is None else limit, MAX_COMPUTE_UNITS)
+    return -(-price * units // 1_000_000)  # the runtime rounds up
 
 
 def _mints(side: str, asset: str = "SOL") -> tuple[Pubkey, Pubkey, int, int]:
@@ -341,6 +368,18 @@ class ChainClient:
             raise SwapFailed("Jupiter transaction has an unexpected fee payer")
         if msg.header.num_required_signatures != 1:
             raise SwapFailed("Jupiter transaction requires unexpected extra signers")
+        keys = msg.account_keys
+        for ix in msg.instructions:
+            program = keys[ix.program_id_index] if ix.program_id_index < len(keys) else None
+            if program not in SWAP_PROGRAMS:
+                raise SwapFailed(f"Jupiter transaction calls an unexpected program {program}")
+        fee = priority_fee_lamports(msg)
+        if fee > MAX_PRIORITY_LAMPORTS * PRIORITY_SLACK:
+            raise SwapFailed(f"Jupiter transaction sets a priority fee of {fee} lamports, above {MAX_PRIORITY_LAMPORTS}")
+
+    def _tokens(self, snap: Snapshot) -> dict[str, int]:
+        """Raw balance of every token account the bot watches, by symbol (SOL is the wSOL account)."""
+        return {"USDC": snap.usdc, "SOL": snap.wsol, **dict(zip(self._extra, snap.extra))}
 
     def _sign(self, tx: VersionedTransaction) -> VersionedTransaction:
         return VersionedTransaction(tx.message, [self._keypair])
@@ -377,6 +416,10 @@ class ChainClient:
             raise SwapFailed(f"simulation spends {spent}, more than the requested {quote.amount_in_raw}")
         if got < min(quote.min_out_raw, min_amount_out(quote.amount_out_raw, self._cfg.max_slippage_bps)):
             raise SwapFailed(f"simulation returns {got}, below the slippage floor")
+        was, now = self._tokens(before), self._tokens(after)
+        for token in sorted(set(was) - {"USDC", asset}):
+            if now[token] < was[token]:
+                raise SwapFailed(f"simulation also takes {token}, which this swap does not trade")
         cost_usd = max(sol_cost, 0) / 10**SOL_DECIMALS * ref_price
         if cost_usd > self._cfg.max_fee_usd:
             raise SwapFailed(f"swap would cost ${cost_usd:.3f} in SOL fees/rent, above MAX_FEE_USD={self._cfg.max_fee_usd}")

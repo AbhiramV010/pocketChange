@@ -80,6 +80,7 @@ PAUSED = "paused"
 HALTED = "halted"
 HALT_REASON = "halt_reason"
 HALTED_AT = "halted_at"
+HALT_EXITS = "halt_exits"  # "1": the halt still lets stops and sell signals close positions (the equity floor)
 DRY_RUN = "dry_run"
 HEARTBEAT = "heartbeat"
 TIMEFRAME = "timeframe"
@@ -241,9 +242,19 @@ def halt_reason(conn: sqlite3.Connection) -> str:
     return get_state(conn, HALT_REASON, "") or ""
 
 
-def set_halted(conn: sqlite3.Connection, reason: str) -> None:
+def halt_allows_exits(conn: sqlite3.Connection) -> bool:
+    """True if the bot is halted but may still sell: no new positions, stops and sell signals keep working."""
+    return is_halted(conn) and _flag(conn, HALT_EXITS)
+
+
+def set_halted(conn: sqlite3.Connection, reason: str, *, exits_ok: bool = False) -> None:
+    """Halt until bot.reset_halt. With `exits_ok` (the equity floor) the bot still sells what it holds; without it
+    (a swap whose outcome is unknown) nothing trades at all. A halt that allows exits never relaxes one that does not."""
+    if exits_ok and is_halted(conn) and not halt_allows_exits(conn):
+        return
     with conn:
-        for key, value in ((HALTED, "1"), (HALT_REASON, reason), (HALTED_AT, utc_now_iso())):
+        values = ((HALTED, "1"), (HALT_REASON, reason), (HALTED_AT, utc_now_iso()), (HALT_EXITS, "1" if exits_ok else "0"))
+        for key, value in values:
             conn.execute(
                 "INSERT INTO state (key, value) VALUES (?, ?) "
                 "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
@@ -253,7 +264,7 @@ def set_halted(conn: sqlite3.Connection, reason: str) -> None:
 
 def clear_halt(conn: sqlite3.Connection) -> None:
     with conn:
-        conn.execute("DELETE FROM state WHERE key IN (?, ?, ?)", (HALTED, HALT_REASON, HALTED_AT))
+        conn.execute("DELETE FROM state WHERE key IN (?, ?, ?, ?)", (HALTED, HALT_REASON, HALTED_AT, HALT_EXITS))
 
 
 def insert_trade(

@@ -129,3 +129,24 @@ def test_a_bad_simulated_btc_effect_is_refused_before_sending(client):
         client.swap(BUY, 1.0, BTC_PRICE, "BTC")
     assert "sendTransaction" not in net.calls
 
+
+def test_a_swap_that_also_drains_another_coin_is_refused_before_sending(client):
+    net = wire(client, btc=150_000)
+    out = 10**9 // 100  # $1 of SOL at $100
+    net.after = (net.before[0] - 10_000, net.before[1] - 1_000_000, out, net.before[3])
+    net.sim = net.after[:3] + (0,)  # a fair SOL buy that also empties the wBTC account
+    client._jupiter = lambda path, params=None, body=None: (
+        {**Net.jupiter(net, path, params, body), "outAmount": str(out), "otherAmountThreshold": str(out * 99 // 100)}
+        if path == "quote" else Net.jupiter(net, path, params, body)
+    )
+    with pytest.raises(SwapFailed, match="also takes BTC"):
+        client.swap(BUY, 1.0, 100.0, "SOL")
+    assert "sendTransaction" not in net.calls
+
+
+def test_a_swap_may_leave_other_coins_untouched_or_receive_into_them(client):
+    net = wire(client, btc=150_000)
+    out = int(1.0 / BTC_PRICE * 1e8)
+    net.after = (net.before[0] - 10_000, net.before[1] - 1_000_000, 0, net.before[3] + out)
+    assert client.swap(BUY, 1.0, BTC_PRICE, "BTC").amount_out == pytest.approx(out / 1e8)
+

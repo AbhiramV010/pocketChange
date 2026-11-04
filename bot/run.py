@@ -163,12 +163,16 @@ def run_cycle(ctx: Context) -> None:
 
     if not halted:
         halted = _enforce_equity_floor(ctx, balances, prices)
-    if halted:
+    exits_only = halted and db.halt_allows_exits(conn)
+    if halted and not exits_only:
         log.info("HALTED (%s); not trading. Clear with: python -m bot.reset_halt", db.halt_reason(conn))
         return
     if paused:
         log.info("paused; not trading (usdc=%.2f positions=%s)", balances.usdc, _fmt_positions(balances, prices))
         return
+    if exits_only:
+        log.info("HALTED (%s); no new positions, stops and sells still run. Clear with: python -m bot.reset_halt",
+                 db.halt_reason(conn))
 
     bench = _closed_bench(markets, now, timeframe)
     risk_on = _risk_on(ctx, markets, bench)
@@ -180,7 +184,7 @@ def run_cycle(ctx: Context) -> None:
             if asset in held:
                 log.warning("%s: no usable price this cycle", label(asset))
             continue
-        entry_ok = asset in cfg.assets or risky_on
+        entry_ok = (asset in cfg.assets or risky_on) and not exits_only
         plan = _plan(ctx, asset, candles, balances, price, now, timeframe, risk_on, entry_ok, bench, equity)
         if plan is not None:
             plans.append(plan)
@@ -198,7 +202,7 @@ def run_cycle(ctx: Context) -> None:
         # A sell bigger than MAX_TRADE_USDC goes out in capped chunks, one swap each, all before the buys (as the
         # backtest fills them), so the buys see the cash the exit freed. _trade_if_signal stops at the last chunk.
         for _ in range(MAX_SELL_CHUNKS if plan.signal is Signal.SELL else 1):
-            if db.is_halted(conn):
+            if not _may_trade(conn, plan.signal):
                 break
             after = _trade_if_signal(ctx, plan, balances, prices, now, timeframe)
             if after is None:
@@ -280,6 +284,10 @@ def portfolio_equity(
 
 
 def _enforce_equity_floor(ctx: Context, balances: Balances, prices: dict[str, float]) -> bool:
+    """Halt below MIN_EQUITY_USD: no new positions, but the stops and sell signals keep guarding what is open, so a
+    falling market cannot keep eating an unattended position. Open positions are not dumped at the halt."""
+    if db.is_halted(ctx.conn):
+        return True  # already halted: keep its reason and kind
     equity = portfolio_equity(balances, prices, db.last_marks(ctx.conn))
     if equity is None:
         log.warning("equity floor not checked: a held asset has no price")
@@ -287,9 +295,16 @@ def _enforce_equity_floor(ctx: Context, balances: Balances, prices: dict[str, fl
     if equity >= ctx.cfg.min_equity_usd:
         return False
     reason = f"equity ${equity:.2f} is below MIN_EQUITY_USD ${ctx.cfg.min_equity_usd:.2f}"
-    db.set_halted(ctx.conn, reason)
-    log.critical("HALTING: %s. The open position is not sold.", reason)
+    db.set_halted(ctx.conn, reason, exits_ok=True)
+    log.critical("HALTING: %s. No new positions; stops and sell signals still close what is open.", reason)
     return True
+
+
+def _may_trade(conn: sqlite3.Connection, signal: Signal) -> bool:
+    """Not paused and not halted, except that an equity-floor halt still lets exits through."""
+    if db.is_paused(conn):
+        return False
+    return not db.is_halted(conn) or (signal is Signal.SELL and db.halt_allows_exits(conn))
 
 
 def _state_key(key: str, asset: str) -> str:
@@ -486,7 +501,7 @@ def _trade_if_signal(
 
     db.set_state(conn, attempt_key, key)
     db.set_state(conn, count_key, str(attempts + 1))
-    if db.is_paused(conn) or db.is_halted(conn):  # flipped while this cycle was running
+    if not _may_trade(conn, signal):  # paused or halted while this cycle was running
         log.info("paused/halted during the cycle; not trading")
         return None
 
