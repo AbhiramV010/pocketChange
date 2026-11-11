@@ -224,7 +224,7 @@ class Service:
 
 
 def wait_for_dashboard(port: int, service: Service) -> bool:
-    url = f"http://127.0.0.1:{port}/_stcore/health"
+    url = f"http://127.0.0.1:{port}/healthz"
     deadline = time.monotonic() + HEALTH_TIMEOUT_S
     while time.monotonic() < deadline:
         if service.exit_code() is not None:
@@ -281,9 +281,7 @@ def run(args: argparse.Namespace) -> int:
     bot = Service("bot", [py, "-m", "bot.run"], stop_grace=BOT_STOP_GRACE_S)  # bot.run writes data/bot.log itself
     ui = Service(
         "dashboard",
-        [py, "-m", "streamlit", "run", str(ROOT / "dashboard" / "app.py"),
-         "--server.headless", "true", "--server.address", "127.0.0.1", "--server.port", str(port),
-         "--browser.gatherUsageStats", "false"],
+        [py, "-m", "dashboard.server", "--port", str(port)],
         log_file=cfg.db_path.parent / "dashboard.log",
     )
     services = [bot, ui]

@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pocketchange</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand"><span class="logo">&#9670;</span> pocketchange</div>
+  <div id="ticker" class="ticker"></div>
+  <div class="top-right">
+    <span id="hb" class="hb" title="bot heartbeat"><i class="dot dead"></i><span id="hb-text">no signal</span></span>
+    <span id="mode-badge" class="badge dry hidden">DRY RUN</span>
+    <span id="clock" class="clock">--:--:--</span>
+  </div>
+</header>
+<div id="halt-banner" class="hidden"></div>
+
+<main id="layout">
+  <section id="main-col">
+    <div id="kpi-strip" class="panel"></div>
+
+    <div class="panel chart-panel">
+      <div class="panel-head">
+        <div class="tabs" id="chart-tabs">
+          <button data-tab="equity" class="tab active">Equity</button>
+          <button data-tab="candles" class="tab">SOL candles</button>
+        </div>
+        <div class="pills" id="range-pills"></div>
+      </div>
+      <div class="chart-wrap" id="chart-wrap">
+        <canvas id="chart"></canvas>
+        <div id="tooltip" class="tooltip hidden"></div>
+        <div id="chart-empty" class="chart-empty hidden"></div>
+      </div>
+      <div id="chart-caption" class="caption"></div>
+    </div>
+
+    <div class="panel log-panel">
+      <div class="panel-head"><h2>Trade log</h2><span id="log-note" class="dim mono"></span></div>
+      <div class="table-scroll" id="log-scroll">
+        <table id="trade-log"><thead></thead><tbody></tbody></table>
+        <div id="log-empty" class="empty hidden">No trades yet.</div>
+      </div>
+    </div>
+  </section>
+
+  <aside id="rail">
+    <div class="panel controls">
+      <div class="controls-row">
+        <button id="ctl-stop" class="btn stop">STOP</button>
+        <button id="ctl-risky" class="btn risky">RISKY</button>
+      </div>
+      <div id="ctl-tf" class="seg"></div>
+      <div id="ctl-lock" class="lock hidden">&#128274; read-only public view</div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>Positions</h2><span id="pos-mode" class="dim"></span></div>
+      <div class="table-scroll" id="pos-scroll">
+        <table id="positions"><thead></thead><tbody></tbody></table>
+        <div id="pos-empty" class="empty hidden">No positions yet.</div>
+      </div>
+    </div>
+
+    <div class="panel ai-panel hidden" id="ai-panel">
+      <div class="panel-head"><h2>AI</h2></div>
+      <div id="ai-body" class="panel-body"></div>
+    </div>
+
+    <div class="panel sniper-panel hidden" id="sniper-panel">
+      <div class="panel-head"><h2>Memecoin sniper (simulated)</h2></div>
+      <div id="sniper-body" class="panel-body"></div>
+    </div>
+  </aside>
+</main>
+
+<div id="nodb" class="overlay hidden">
+  <div class="overlay-card">
+    <div class="overlay-logo">&#9670;</div>
+    <div id="nodb-text" class="overlay-text"></div>
+  </div>
+</div>
+<div id="offline" class="offline hidden">dashboard API unreachable &mdash; retrying</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

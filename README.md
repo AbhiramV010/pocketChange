@@ -1,6 +1,6 @@
 # pocketchange
 
-Python trading bot for a self-custody **Solana** wallet (~$20 USDC). Pipeline: **backtest, paper trade, live**. Trades via Jupiter, keeps state in SQLite, and has a Streamlit dashboard with a pause switch (separate process).
+Python trading bot for a self-custody **Solana** wallet (~$20 USDC). Pipeline: **backtest, paper trade, live**. Trades via Jupiter, keeps state in SQLite, and has a trading-terminal dashboard with a pause switch (separate process).
 
 ## Run (Windows, Python 3.11+)
 
@@ -10,7 +10,7 @@ python launch.py
 
 Sets up `.venv` and `.env` (from `.env.example`), checks the price feed, starts bot + dashboard (`http://localhost:8501`) and restarts crashes. Ctrl+C finishes the current cycle first. Flags: `--no-browser`, `--port N`, `--check`, `--yes`. Dry run (default) needs no key or funds.
 
-By hand: `python -m bot.data` (candles), `bot.backtest`, `bot.portfolio_backtest [--ml] [--grid]`, `bot.run [--once]`, `streamlit run dashboard/app.py`, `python -m pytest`. Also `bot.reset_halt` (only way to clear a halt), `bot.chain new-wallet|check|swap buy 1.0`, `bot.ml train|eval`.
+By hand: `python -m bot.data` (candles), `bot.backtest`, `bot.portfolio_backtest [--ml] [--grid]`, `bot.run [--once]`, `python -m dashboard.server --port 8501`, `python -m pytest`. Also `bot.reset_halt` (only way to clear a halt), `bot.chain new-wallet|check|swap buy 1.0`, `bot.ml train|eval`.
 
 ## Config (`.env`)
 
@@ -70,4 +70,4 @@ What this does and does not show:
 
 ## Layout
 
-`bot/` (config, db, assets, data, strategy, ml, backtest, sniper, chain, run), `dashboard/app.py`, `tests/`, `launch.py`, `data/` (gitignored).
+`bot/` (config, db, assets, data, strategy, ml, backtest, sniper, chain, run), `dashboard/` (FastAPI server in `server.py`, read-only view layer in `view.py`, static terminal frontend in `web/`), `tests/`, `launch.py`, `data/` (gitignored).
