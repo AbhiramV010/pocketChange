@@ -52,6 +52,18 @@ CREATE TABLE IF NOT EXISTS ai_predictions (  -- every AI score, graded once its 
     UNIQUE (asset, timeframe, candle)
 );
 CREATE INDEX IF NOT EXISTS idx_ai_open ON ai_predictions (timeframe, resolved);
+CREATE TABLE IF NOT EXISTS tca (   -- transaction-cost analysis: what each fill cost against the decision price
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    side TEXT NOT NULL,
+    arrival REAL NOT NULL,
+    fill REAL NOT NULL,
+    notional REAL NOT NULL,
+    shortfall_bps REAL,
+    fees_usd REAL,
+    simulated INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS snipes (   -- simulated new-token sniper: a sandbox that never touches the wallet
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     mint          TEXT    NOT NULL UNIQUE,
@@ -483,3 +495,22 @@ def sniper_free_usdc(conn: sqlite3.Connection, bankroll: float) -> float:
         """
     ).fetchone()
     return bankroll + row["delta"]
+
+
+def record_tca(
+    conn: sqlite3.Connection, asset: str, side: str, arrival: float, fill: float, notional: float,
+    fees_usd: float, simulated: bool, timestamp: str | None = None,
+) -> None:
+    from bot.execution import implementation_shortfall_bps
+
+    with conn:
+        conn.execute(
+            "INSERT INTO tca (timestamp, asset, side, arrival, fill, notional, shortfall_bps, fees_usd, simulated) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (timestamp or utc_now_iso(), asset, side, arrival, fill, notional,
+             implementation_shortfall_bps(side, arrival, fill), fees_usd, int(simulated)),
+        )
+
+
+def read_tca(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM tca ORDER BY id").fetchall()

@@ -79,6 +79,7 @@ def walk(n, seed, drift, vol=0.006):
 FULL = Params(
     fast=5, slow=20, entry="trend", edge_bps=5.0, confirm=False, stop_atr=2.0, hard_stop_pct=4.0,
     reentry_candles=3, regime_len=50, risk_pct=1.0,
+    intrabar=False,  # the test rig shows the live loop one price per candle; intrabar stops are tested in test_phase2
 )
 
 

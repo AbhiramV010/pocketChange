@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 from bot.config import FEE_RATE, FIXED_COST_USD, MIN_TRADE_USDC, SLIPPAGE_RATE
-from bot.strategy import Params, Signal, buy_budget, decide_core, momentum, regime_ok, size_trade
+from bot.strategy import Params, Signal, buy_budget, decide_core, hard_stop_level, momentum, regime_ok, size_trade
 
 REGIME_ASSET = "BTC"  # the market filter looks at BTC, as in the live loop
 YEAR = pd.Timedelta(days=365)
@@ -204,6 +204,23 @@ def simulate(
             open_now += 1
             trades += 1
 
+        # 1b. Intrabar hard stop: a position older than this candle that trades through its stop level is sold at the
+        # level, or at the open if the candle gapped through it (live: the loop sees the price every minute).
+        if p.intrabar:
+            for a in assets:
+                level = hard_stop_level(cost[a] / qty[a], p) if qty[a] > 0 else 0.0
+                if level > 0 and held(a, o[a][i]) and entry_i[a] != i and lo[a][i] <= level:
+                    px = min(o[a][i], level)
+                    proceeds = max(0.0, qty[a] * px * (1 - slippage_rate) * (1 - fee_rate) - fixed_cost)
+                    result = proceeds - cost[a]
+                    fills.append((index[i], "sell", a, qty[a], proceeds))
+                    cash += proceeds
+                    pnl[a] += result
+                    trade_pnl.append(result + round_trip.pop(a, 0.0))
+                    qty[a], cost[a] = 0.0, 0.0
+                    last_sell_i[a], exiting[a] = i, False
+                    trades += 1
+
         # 2. Mark to market at this close.
         invested[i] = sum(qty[a] * c[a][i] for a in assets)
         equity[i] = cash + invested[i]
@@ -317,6 +334,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-positions", type=int, default=settings.max_positions)
     parser.add_argument("--ml", action="store_true", help="also backtest the AI on walk-forward probabilities")
     parser.add_argument("--grid", action="store_true", help="test a grid of settings on each half of the period")
+    parser.add_argument("--research", action="store_true", help="deflated Sharpe, bootstrap CIs, PBO, benchmarks, cost stress")
+    parser.add_argument("--targets", action="store_true", help="the target-weight book (vol target, top-k, governor)")
+    parser.add_argument("--walk-forward", action="store_true", help="rolling re-selection of settings, stitched out-of-sample")
     args = parser.parse_args(argv)
     symbols = [s.strip().upper() for s in args.assets.split(",")]
     fetch = lambda s: data.fetch_history(ASSETS[s].market, args.days, args.timeframe, settings.candle_exchange)  # noqa: E731
@@ -325,6 +345,25 @@ def main(argv: list[str] | None = None) -> None:
     bench = fetch(REGIME_ASSET) if bench is None else bench
     kw = dict(trade_usdc=settings.max_trade_usdc, max_positions=args.max_positions)
     base = Params()
+    if args.research:
+        from bot import research
+        print(research.research_report(candles, bench, base, **kw))
+        return
+    if args.targets:
+        from bot import targets
+        res = targets.simulate_targets(candles, bench)
+        print(report([buy_and_hold(candles), simulate(candles, base, bench=bench, label="configured (.env) rules", **kw), res]))
+        return
+    if args.walk_forward:
+        from bot import research
+        bars = int(pd.Timedelta(days=1) / data.candle_delta(args.timeframe))
+        grid = [replace(base, fast=f, slow=s, stop_atr=a) for f in (10, 20, 30) for s in (30, 50, 80) for a in (2.0, 3.0, 4.0) if f < s]
+        curve, chosen = research.rolling_walk_forward(candles, bench, grid, train_bars=180 * bars, test_bars=30 * bars, **kw)
+        r = research.returns_of(curve)
+        ann = research.periods_per_year(curve)
+        print(f"walk-forward out of sample: return {curve.iloc[-1] - 1:+.1%}, Sharpe {research.sharpe_ratio(r, ann):.2f}, "
+              f"max DD {research.max_drawdown(r):.1%}, {len(chosen)} blocks")
+        return
     if args.grid:
         print(f"{'setting':<30}{'1st half':>10}{'sharpe':>8}{'2nd half':>10}{'sharpe':>8}{'trades':>8}")
         for name, a, b in robustness(candles, bench, base, **kw):

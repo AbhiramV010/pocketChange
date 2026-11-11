@@ -24,8 +24,9 @@ import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import roc_auc_score
 
+from bot import ml_research
 from bot.config import DATA_DIR, ROUND_TRIP_COST, Settings, candle_freq
-from bot.strategy import Params, Signal, gate_entry, stop_hit
+from bot.strategy import Params, Signal, gate_entry, intrabar_hit, stop_hit
 
 log = logging.getLogger("bot.ml")
 
@@ -231,9 +232,10 @@ def ml_decide(
     bars_since_sell: float | None = None,
     risk_on: bool = True,
     exiting: bool = False,
+    live_price: float | None = None,
 ) -> Signal:
     """The whole AI rule for one asset: the model's call, then the same stops and entry filters as the SMA rule."""
-    if holding and (exiting or stop_hit(high, low, close, entry_price, bars_held, p)):
+    if holding and (exiting or intrabar_hit(live_price, entry_price, p) or stop_hit(high, low, close, entry_price, bars_held, p)):
         return Signal.SELL
     signal = ml_signal(prob, holding, bars_held, mp)
     return signal if holding else gate_entry(signal, p, risk_on=risk_on, bars_since_sell=bars_since_sell)
@@ -311,7 +313,16 @@ class ModelManager:
         try:
             started = time.monotonic()
             frames = self._history(timeframe) if self._history else fetch_frames(self._cfg, timeframe)
-            bundle = train(frames, MLParams.from_settings(self._cfg), timeframe, self.get(timeframe).oos_auc if self.get(timeframe) else None)
+            params = MLParams.from_settings(self._cfg)
+            incumbent = self.get(timeframe)
+            bundle = train(frames, params, timeframe, incumbent.oos_auc if incumbent else None)
+            if incumbent is not None and (incumbent.params.horizon, incumbent.params.target_pct) == (params.horizon, params.target_pct):
+                promote, ic_c, ic_i = ml_research.holdout_gate(dataset(frames, params), incumbent.model, fit, FEATURE_NAMES)
+                if not promote:  # the challenger did not beat the live model on the newest month: keep the live one
+                    log.info("ML retrain for %s not promoted: challenger IC %.3f vs live %.3f", timeframe, ic_c, ic_i)
+                    incumbent.trained_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                    save(incumbent)
+                    return
             save(bundle)
             with self._lock:
                 self._bundles[timeframe] = bundle

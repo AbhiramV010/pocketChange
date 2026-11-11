@@ -197,16 +197,31 @@ class ChainClient:
         return text
 
     def _rpc(self, method: str, params: list | None = None):
-        resp = self._http.post(
-            self._cfg.solana_rpc_url,
-            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []},
-            timeout=HTTP_TIMEOUT_S,
-        )
-        resp.raise_for_status()
-        body = resp.json()
+        payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []}
+        last: Exception | None = None
+        for url in (self._cfg.solana_rpc_url, *self._cfg.solana_rpc_fallbacks):  # a dead node is not the end
+            try:
+                resp = self._http.post(url, json=payload, timeout=HTTP_TIMEOUT_S)
+                resp.raise_for_status()
+                body = resp.json()
+                break
+            except (requests.RequestException, ValueError) as exc:
+                last = exc
+        else:
+            raise last  # every endpoint failed
         if "error" in body:
             raise RpcError(f"{method}: {self._scrub(json.dumps(body['error']))[:300]}")
         return body["result"]
+
+    def _priority_level(self) -> str:
+        """'high' while recent prioritisation fees spike, else 'medium'; the lamport cap and the message check still apply."""
+        try:
+            from bot.execution import choose_priority_level
+
+            rows = self._rpc("getRecentPrioritizationFees", [])
+            return choose_priority_level([int(r["prioritizationFee"]) for r in rows])
+        except Exception:
+            return "medium"
 
     def _jupiter(self, path: str, params: dict | None = None, body: dict | None = None) -> dict:
         url = f"{self._cfg.jupiter_api_url}/{path}"
@@ -340,7 +355,7 @@ class ChainClient:
                 "wrapAndUnwrapSol": False,  # trade wSOL; native SOL stays untouched for fees
                 "dynamicComputeUnitLimit": True,
                 "prioritizationFeeLamports": {
-                    "priorityLevelWithMaxLamports": {"maxLamports": MAX_PRIORITY_LAMPORTS, "priorityLevel": "medium"}
+                    "priorityLevelWithMaxLamports": {"maxLamports": MAX_PRIORITY_LAMPORTS, "priorityLevel": self._priority_level()}
                 },
             },
         )

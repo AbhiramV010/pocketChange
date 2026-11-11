@@ -22,6 +22,14 @@ By hand: `python -m bot.data` (candles), `bot.backtest`, `bot.portfolio_backtest
 
 The AI's labels are net of the 0.8% round trip: a "win" is a trade that keeps `ML_TARGET_PCT` after costs. `ML_ADAPT` moves the buy threshold only when the bot's own graded calls prove it (independent windows, mean two standard errors above zero).
 
+## Research and risk tools
+
+- `bot.portfolio_backtest --research` deflated Sharpe (counts every setting ever tried, `data/trials.jsonl`), bootstrap intervals, PBO, vol-matched and BTC-filter benchmarks, break-even cost; `--walk-forward` rolling re-selection; `--targets` the target-weight book (`bot/targets.py`: trend score, top-k, vol target, drawdown governor, no-trade band, cash yield).
+- `INTRABAR_STOPS` (default on): the hard stop also fires on the live price each cycle, and on candle lows in backtests.
+- `bot.store update|check` Parquet history with gap/outlier checks; `bot.execution report` cost analysis (fills vs decision price); `bot.reconcile` live vs backtest; `bot.monitor`, `bot.attribution`, `bot.lifecycle` (stage gates and kill rules).
+- Research-only until a venue that can short is wired in: `bot.statarb`, `bot.carry`, `bot.ml_research` (vol-scaled and triple-barrier labels, purged CV, calibration, promotion gate: a retrained AI model replaces the live one only if it scores better on the newest month).
+- `SOLANA_RPC_FALLBACKS` backup RPC endpoints; the priority fee level rises to "high" while recent fees spike (still capped).
+
 ## Safety
 
 - The key is read only in `bot/chain.py` and never logged.

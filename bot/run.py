@@ -390,6 +390,7 @@ def _plan(
             closed, p, holding=holding, entry_price=entry_price, entry_time=entry_time,
             last_sell_time=db.last_trade_time(conn, "sell", cfg.dry_run, asset), risk_on=risk_on,
             exiting=holding and _exiting(side, ago, balances.qty(asset), log_qty), timeframe=timeframe,
+            live_price=price,
         )
         if signal is Signal.BUY and not holding:
             budget = _budget(ctx, closed, equity)
@@ -444,7 +445,7 @@ def _plan_ml(
         prob, closed["close"].to_numpy(float), closed["high"].to_numpy(float), closed["low"].to_numpy(float), mp,
         ctx.params, holding=holding, entry_price=entry_price, bars_held=bars,
         bars_since_sell=bars_since(closed, db.last_trade_time(conn, "sell", cfg.dry_run, asset), timeframe),
-        risk_on=entry_ok, exiting=holding and _exiting(side, ago, balances.qty(asset), log_qty),
+        risk_on=entry_ok, exiting=holding and _exiting(side, ago, balances.qty(asset), log_qty), live_price=price,
     )
     signal = _one_decision_per_candle(signal, side, ago)
     log.info("ai | %s %s p(win)=%s -> %s", name, timeframe, "-" if prob is None else f"{prob:.2f}", signal.value)
@@ -533,6 +534,12 @@ def _trade_if_signal(
         return None
 
     db.insert_trade(conn, side, fill, cfg.dry_run, timestamp=ctx.clock().isoformat(timespec="seconds"), asset=asset)
+    try:  # cost analysis: the fill against the price the decision was made at (never blocks trading)
+        notional = fill.amount_in if side == "buy" else fill.amount_out
+        db.record_tca(conn, asset, side, price, fill.price, notional, FIXED_COST_USD, cfg.dry_run,
+                      timestamp=ctx.clock().isoformat(timespec="seconds"))
+    except Exception as exc:
+        log.warning("cost analysis not recorded: %s", type(exc).__name__)
     db.set_state(conn, count_key, "0")
     left_usd = (held - fill.amount_in) * price
     if side == "buy" or left_usd < MIN_TRADE_USDC:

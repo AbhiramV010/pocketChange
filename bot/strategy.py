@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from bot.config import (
-    EDGE_BPS, ENTRY, HARD_STOP_PCT, REENTRY_CANDLES, REGIME_LEN, RISK_PCT, SMA_FAST, SMA_SLOW, STOP_ATR, TIMEFRAME,
+    EDGE_BPS, ENTRY, HARD_STOP_PCT, INTRABAR_STOPS, REENTRY_CANDLES, REGIME_LEN, RISK_PCT, SMA_FAST, SMA_SLOW, STOP_ATR, TIMEFRAME,
     TREND_CONFIRM, candle_freq,
 )
 
@@ -37,6 +37,7 @@ class Params:
     reentry_candles: int = REENTRY_CANDLES  # after any sell, wait this many candles before buying again
     regime_len: int = REGIME_LEN  # only open new positions while BTC is above its SMA of this length (0 = off)
     risk_pct: float = RISK_PCT  # size buys so hitting the stop loses this % of equity (0 = flat MAX_TRADE_USDC)
+    intrabar: bool = INTRABAR_STOPS  # hard stop also fires on the live price / candle low, not only the close
 
 
 # Array cores. The live loop and the backtest both call these, so they cannot drift apart.
@@ -89,6 +90,15 @@ def atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = ATR_
     return float(true_range.mean())
 
 
+def hard_stop_level(entry_price: float, p: Params) -> float:
+    """Price at or under which the hard stop fires (0 if it is off)."""
+    return entry_price * (1 - p.hard_stop_pct / 100) if p.hard_stop_pct > 0 and entry_price > 0 else 0.0
+
+
+def intrabar_hit(live_price: float | None, entry_price: float, p: Params) -> bool:
+    return bool(p.intrabar and live_price is not None and live_price <= hard_stop_level(entry_price, p) > 0)
+
+
 def stop_hit(
     high: np.ndarray, low: np.ndarray, close: np.ndarray, entry_price: float, bars_since_entry: int, p: Params
 ) -> bool:
@@ -138,6 +148,7 @@ def decide_core(
     bars_since_sell: float | None = None,
     risk_on: bool = True,
     exiting: bool = False,
+    live_price: float | None = None,
 ) -> Signal:
     """The whole SMA rule for one asset on closed candles. The live loop (via `decide`) and the backtest call this.
 
@@ -146,7 +157,8 @@ def decide_core(
     down or the feed was stale for the cross candle, the exit still fires on the next cycle that sees candles."""
     signal = sma_signal(close, p)
     if holding:
-        if exiting or stop_hit(high, low, close, entry_price, bars_held, p) or trend_down(close, p):
+        if (exiting or intrabar_hit(live_price, entry_price, p) or stop_hit(high, low, close, entry_price, bars_held, p)
+                or trend_down(close, p)):
             return Signal.SELL
         return signal
     if signal is Signal.BUY and p.entry == "trend" and not trend_reset_since(close, p, bars_since_sell):
@@ -192,6 +204,7 @@ def decide(
     risk_on: bool = True,
     exiting: bool = False,
     timeframe: str = TIMEFRAME,
+    live_price: float | None = None,
 ) -> Signal:
     """Signal for one asset from its closed candles, given what we hold of it."""
     if entry_time is not None:
@@ -202,6 +215,7 @@ def decide(
         candles["close"].to_numpy(dtype=float), candles["high"].to_numpy(dtype=float),
         candles["low"].to_numpy(dtype=float), p, holding=holding, entry_price=entry_price, bars_held=bars,
         bars_since_sell=bars_since(candles, last_sell_time, timeframe), risk_on=risk_on, exiting=exiting,
+        live_price=live_price,
     )
 
 

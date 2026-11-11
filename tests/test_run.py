@@ -222,12 +222,14 @@ def test_equity_below_floor_halts_and_stays_halted_across_restart(conn):
     assert not db.is_halted(conn) and len(trades(conn)) == 1
 
 
-def test_halt_does_not_sell_the_open_position(conn):
+def test_equity_floor_halt_still_lets_the_exit_through(conn):
+    """Stops and sell signals keep guarding an open position after the floor halt (decided: exits are never blocked)."""
     db.insert_trade(conn, "buy", db.Fill(10.0, 0.1, 100.0, None), simulated=True, timestamp=SETUP)
     cfg = replace(CFG, min_equity_usd=1000.0)
     Rig(conn, sell_signal_series(), cfg=cfg).cycle()
     assert db.is_halted(conn)
-    assert trades(conn)["side"].tolist() == ["buy"]  # no sell despite a SELL signal
+    sides = trades(conn)["side"].tolist()
+    assert sides[0] == "buy" and "sell" in sides and set(sides[1:]) == {"sell"}  # no new buys, the exit runs
 
 
 def test_floor_is_checked_right_after_a_trade(conn):

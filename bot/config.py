@@ -36,6 +36,9 @@ HARD_STOP_PCT = float(os.environ.get("HARD_STOP_PCT") or 10)  # also exit if pri
 REENTRY_CANDLES = int(os.environ.get("REENTRY_CANDLES") or 0)  # wait this many candles after a sell before re-buying
 REGIME_LEN = int(os.environ.get("REGIME_LEN") or 400)  # only open positions while BTC is above its SMA of this length
 RISK_PCT = float(os.environ.get("RISK_PCT") or 1)  # size buys so a stop-out loses this % of equity (0 = flat size)
+# Check the hard stop against the live price every cycle (and against each candle's low in the backtest), not only at
+# the close: on a 4h candle a close-only stop can fill far below HARD_STOP_PCT.
+INTRABAR_STOPS = (os.environ.get("INTRABAR_STOPS") or "true").strip().lower() in ("1", "true", "yes", "on")
 MIN_TRADE_USDC = 1.0  # below this a trade is not worth the fees
 
 # Cost model shared by the backtest, the dry-run simulator and the AI's labels.
@@ -117,6 +120,7 @@ def _path(env: Mapping[str, str], name: str, default: Path) -> Path:
 class Settings:
     dry_run: bool = True
     solana_rpc_url: str = "https://api.mainnet-beta.solana.com"
+    solana_rpc_fallbacks: tuple[str, ...] = ()  # tried in order when the main RPC endpoint fails
     jupiter_api_url: str = "https://lite-api.jup.ag/swap/v1"
     max_trade_usdc: float = 5.0
     max_slippage_bps: int = 100
@@ -177,6 +181,7 @@ class Settings:
         need(0 < self.max_quote_deviation_bps <= 2000, "MAX_QUOTE_DEVIATION_BPS must be in 1..2000")
         need(self.max_fee_usd > 0, "MAX_FEE_USD must be > 0")
         need(self.solana_rpc_url.startswith(("http://", "https://")), "SOLANA_RPC_URL must be an http(s) URL")
+        need(all(u.startswith(("http://", "https://")) for u in self.solana_rpc_fallbacks), "SOLANA_RPC_FALLBACKS must be http(s) URLs")
         need(self.jupiter_api_url.startswith("https://"), "JUPITER_API_URL must be an https URL")
         need(bool(self.assets) and PRIMARY in self.assets, f"ASSETS must include {PRIMARY}")
         need(len(set(self.assets + self.risky_assets)) == len(self.assets + self.risky_assets), "ASSETS/RISKY_ASSETS has a duplicate")
@@ -219,6 +224,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     return Settings(
         dry_run=_bool(env, "DRY_RUN", True),
         solana_rpc_url=_raw(env, "SOLANA_RPC_URL") or defaults.solana_rpc_url,
+        solana_rpc_fallbacks=tuple(u.strip() for u in (_raw(env, "SOLANA_RPC_FALLBACKS") or "").split(",") if u.strip()),
         jupiter_api_url=(_raw(env, "JUPITER_API_URL") or defaults.jupiter_api_url).rstrip("/"),
         max_trade_usdc=_number(env, "MAX_TRADE_USDC", defaults.max_trade_usdc),
         max_slippage_bps=_number(env, "MAX_SLIPPAGE_BPS", defaults.max_slippage_bps, int),
