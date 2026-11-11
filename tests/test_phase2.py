@@ -107,3 +107,11 @@ def test_backtest_stop_fills_at_the_level_not_the_close():
     hit = [f for f in on.fills if f[1] == "sell" and f[0] == crash.index[70] and f[2] == "SOL"]
     assert hit and hit[0][4] / hit[0][3] < px[70]  # sold at the stop level, below where the candle closed
     assert not [f for f in off.fills if f[1] == "sell" and f[0] == crash.index[70]]
+
+
+def test_kept_weights_are_not_traded_even_with_a_large_account():
+    d = {"SOL": candles(walk(700, 0.002, 0.004, 1), "4h"), "ETH": candles(walk(700, 0.002, 0.004, 2), "4h")}
+    btc = candles(walk(700, 0.002, 0.004, 3), "4h")
+    wide = targets.simulate_targets(d, btc, replace(CFG, target_vol=0.6, band=0.9), start_cash=1_000_000.0)
+    tight = targets.simulate_targets(d, btc, replace(CFG, target_vol=0.6, band=0.01), start_cash=1_000_000.0)
+    assert wide.trades < tight.trades and wide.trades <= 6  # a huge band: little more than the opening buys

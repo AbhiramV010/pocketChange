@@ -217,3 +217,14 @@ def test_point_in_time_universe_excludes_coins_not_yet_listed():
     assert list(u) == ["BTC"]
     assert set(research.listed_before({"BTC": old, "TRUMP": new}, old.index[250])) == {"BTC", "TRUMP"}
     assert list(research.listed_before({"BTC": old, "TRUMP": new}, old.index[250], min_bars=100)) == ["BTC"]
+
+
+def test_the_live_loop_logs_new_alerts_once(conn, caplog):
+    from tests.test_run import Rig, buy_signal_series
+    rig = Rig(conn, buy_signal_series())
+    db.set_halted(conn, "test halt")
+    with caplog.at_level("WARNING", logger="bot"):
+        rig.cycle()
+        rig.ctx.alerts_at = None  # let the monitor run again straight away
+        rig.cycle()
+    assert sum("ALERT: HALTED" in r.getMessage() for r in caplog.records) == 1

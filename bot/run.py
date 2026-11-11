@@ -129,6 +129,8 @@ class Context:
     models: object | None = None  # bot.ml.ModelManager when STRATEGY=ml
     scores: dict[str, float] = field(default_factory=dict)  # this cycle's AI probabilities
     ml_notice: bool = False  # already said this cycle that there is no model
+    alerts_at: datetime | None = None  # when the monitor last ran
+    alerts: tuple = ()  # what it said then, so an unchanged alert is not logged again
 
 
 @dataclass
@@ -148,6 +150,7 @@ def run_cycle(ctx: Context) -> None:
     db.set_state(conn, db.HEARTBEAT, stamp)
     db.set_state(conn, db.DRY_RUN, "1" if cfg.dry_run else "0")
 
+    _log_alerts(ctx, now)
     paused, halted = db.is_paused(conn), db.is_halted(conn)  # top of the cycle (hard rule 6)
     risky_on = db.is_risky(conn, cfg.risky)
 
@@ -229,6 +232,27 @@ def _active_timeframe(conn: sqlite3.Connection, requested: str, balances: Balanc
             return active
     db.set_state(conn, db.ACTIVE_TIMEFRAME, requested)
     return requested
+
+
+ALERT_EVERY = pd.Timedelta(minutes=15)
+
+
+def _log_alerts(ctx: Context, now: datetime) -> None:
+    """Run the monitor every 15 minutes and log what changed. Monitoring never stops a cycle."""
+    if ctx.alerts_at is not None and pd.Timestamp(now) - pd.Timestamp(ctx.alerts_at) < ALERT_EVERY:
+        return
+    ctx.alerts_at = now
+    try:
+        from bot import monitor
+
+        found = tuple((a.level, a.message) for a in monitor.check(ctx.conn, ctx.cfg, now))
+    except Exception as exc:
+        log.warning("monitor failed: %s", type(exc).__name__)
+        return
+    for level, message in found:
+        if (level, message) not in ctx.alerts:
+            (log.critical if level == "critical" else log.warning)("ALERT: %s", message)
+    ctx.alerts = found
 
 
 def _closed_bench(markets: dict[str, tuple[pd.DataFrame, float | None]], now: datetime, timeframe: str) -> pd.DataFrame | None:

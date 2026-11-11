@@ -70,7 +70,7 @@ def test_vol_matched_hold_matches_target_volatility():
 def test_btc_filter_only_is_flat_while_btc_falls():
     down = candles(100 * 0.998 ** np.arange(600), freq="4h")
     curve = research.btc_filter_only({"SOL": wavy(600)}, down, 50)
-    assert curve.iloc[-1] == pytest.approx(curve.iloc[100:].iloc[0], rel=1e-9) or curve.iloc[-1] >= 0.9
+    assert curve.iloc[-1] == pytest.approx(1.0)  # never invested: BTC is below its average the whole time
 
 
 def test_rolling_walk_forward_stitches_out_of_sample_blocks():

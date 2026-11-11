@@ -31,7 +31,8 @@ def test_uniqueness_weights_downweight_overlapping_labels():
     w = mr.uniqueness_weights(pd.Series(idx), end.reset_index(drop=True))
     assert w.mean() == pytest.approx(1.0) and (w > 0).all()
     spread_end = pd.Series(idx).shift(-1).fillna(idx[-1])  # non-overlapping labels
-    assert mr.uniqueness_weights(pd.Series(idx), spread_end).std() < w.std() + 1.0
+    lone = mr.uniqueness_weights(pd.Series(idx), pd.Series(idx))  # each label ends where it starts: no overlap
+    assert lone == pytest.approx(np.ones(100)) and w[50] == pytest.approx(w[40])  # interior labels overlap equally
 
 
 def test_purged_kfold_purges_labels_that_reach_into_the_test_block():
@@ -40,7 +41,6 @@ def test_purged_kfold_purges_labels_that_reach_into_the_test_block():
     for train, test in mr.purged_kfold(idx, t_end, k=4, embargo=pd.Timedelta(hours=8)):
         assert not set(train) & set(test)
         lo = idx[test].min()
-        assert (t_end.iloc[train] < lo).all() or (idx[train] > idx[test].max()).all() or True
         before = [i for i in train if idx[i] < lo]
         assert all(t_end.iloc[i] < lo for i in before)  # nothing before the block peeks into it
 
@@ -133,7 +133,7 @@ def test_half_life_matches_the_generating_process():
     beta, alpha = statarb.hedge_ratio(y, x)
     assert beta == pytest.approx(1.0, abs=0.15)
     assert statarb.half_life(statarb.spread(y, x, beta, alpha)) == pytest.approx(-np.log(2) / np.log(0.9), rel=0.4)
-    assert statarb.half_life(np.cumsum(np.random.default_rng(0).normal(size=500))) > 100 or True
+    assert statarb.half_life(np.cumsum(np.random.default_rng(0).normal(size=500))) > 30  # a random walk barely reverts
 
 
 def test_pair_signal_fades_a_stretched_spread_and_exits_at_the_mean():

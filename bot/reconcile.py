@@ -68,10 +68,11 @@ def main(argv: list[str] | None = None) -> None:
     conn = db.connect(settings.db_path, readonly=True)
     trades = db.read_trades(conn)
     since = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=args.days)
-    trades = trades[pd.to_datetime(trades["timestamp"], utc=True) >= since]
+    trades = trades[(pd.to_datetime(trades["timestamp"], utc=True) >= since) & (trades["simulated"].astype(bool) == settings.dry_run)]
     symbols = list(dict.fromkeys(list(settings.assets) + ["BTC"]))
     candles = {s: data.fetch_history(ASSETS[s].market, args.days + 400, args.timeframe, settings.candle_exchange) for s in symbols}
-    res = simulate(candles, Params(), bench=candles["BTC"], trade_usdc=settings.max_trade_usdc, max_positions=settings.max_positions)
+    traded = {s: candles[s] for s in settings.assets}  # BTC is only the market filter unless it is a configured coin
+    res = simulate(traded, Params(), bench=candles["BTC"], trade_usdc=settings.max_trade_usdc, max_positions=settings.max_positions)
     window = [f for f in res.fills if pd.Timestamp(f[0]) >= since]
     rec = reconcile(trades, window, data.candle_delta(args.timeframe))
     print(f"matched {rec.matched}, missing {len(rec.missing_live)}, unexpected {len(rec.extra_live)}, slippage {rec.slippage_bps:.1f} bps")

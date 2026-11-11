@@ -1,11 +1,11 @@
 """Operational monitoring: is the bot alive, is its data fresh, is its model decaying, is the book in drawdown?
 
-`check` returns alerts (level, message); the bot logs them every cycle and the dashboard can show them.
+`check` returns alerts (level, message); the live loop runs it every 15 minutes and logs any new alert.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -62,7 +62,7 @@ def check(conn, cfg, now: datetime, *, max_drawdown: float = 0.15, ml_enter: flo
             alerts.append(Alert("critical", f"bot heartbeat is {age / 60:.0f} min old; is it running?"))
     if db.is_halted(conn):
         alerts.append(Alert("critical", f"HALTED: {db.halt_reason(conn)}"))
-    bal = db.read_balances(conn)
+    bal = db.read_balances(conn, since=now - timedelta(days=30))  # a month is enough to see a drawdown
     if len(bal):
         eq = pd.Series([db.row_equity(r) for _, r in bal.iterrows()], dtype=float).dropna()
         if len(eq) and (dd := drawdown(eq)) > max_drawdown:

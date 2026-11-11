@@ -8,6 +8,8 @@ Python trading bot for a self-custody **Solana** wallet (~$20 USDC). Pipeline: *
 python launch.py
 ```
 
+Linux/macOS: `./start.sh` (same flags as `launch.py`; it refuses to run from WSL over `/mnt` because that would rebuild the Windows venv).
+
 Sets up `.venv` and `.env` (from `.env.example`), checks the price feed, starts bot + dashboard (`http://localhost:8501`) and restarts crashes. Ctrl+C finishes the current cycle first. Flags: `--no-browser`, `--port N`, `--check`, `--yes`. Dry run (default) needs no key or funds.
 
 By hand: `python -m bot.data` (candles), `bot.backtest`, `bot.portfolio_backtest [--ml] [--grid]`, `bot.run [--once]`, `python -m dashboard.server --port 8501`, `python -m pytest`. Also `bot.reset_halt` (only way to clear a halt), `bot.chain new-wallet|check|swap buy 1.0`, `bot.ml train|eval`.

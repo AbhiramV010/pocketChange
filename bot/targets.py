@@ -130,11 +130,14 @@ def simulate_targets(
     peak, trades, in_market = start_cash, 0, 0
     pnl, trade_pnl, fills = dict.fromkeys(assets, 0.0), [], []
     pending: dict[str, float] | None = None
+    moved: set[str] = set()
     per_bar = (1 + cfg.cash_apr) ** (1 / bpy) - 1
     for i in range(n):
         if pending is not None:  # fill last close's decision at this open
             eq_now = cash + sum(qty[a] * o[a][i] for a in assets)
             for a in assets:  # sells first so the buys have the cash
+                if a not in moved:
+                    continue  # inside the no-trade band: leave it alone, whatever the open did to its weight
                 want = pending.get(a, 0.0) * eq_now
                 have = qty[a] * o[a][i]
                 if have - want >= MIN_TRADE_USDC or (pending.get(a, 0.0) == 0.0 and have > 0):
@@ -148,7 +151,7 @@ def simulate_targets(
                     trade_pnl.append(proceeds - basis)
                     fills.append((index[i], "sell", a, sell_qty, proceeds))
                     trades += 1
-            for a in sorted(assets, key=lambda x: pending.get(x, 0.0), reverse=True):
+            for a in sorted(moved, key=lambda x: pending.get(x, 0.0), reverse=True):
                 spend = min(cash, pending.get(a, 0.0) * eq_now - qty[a] * o[a][i])
                 if spend >= MIN_TRADE_USDC and spend > fixed_cost:
                     got = (spend - fixed_cost) * (1 - fee_rate) / (o[a][i] * (1 + slippage_rate))
@@ -170,6 +173,7 @@ def simulate_targets(
                              drawdown=1 - equity[i] / peak, bars_per_year=bpy)
         cur = {a: qty[a] * c[a][i] / equity[i] for a in assets}
         pending = apply_band(cur, tgt, cfg.band)
+        moved = {a for a in assets if pending[a] != cur[a]}
     curve = pd.Series(equity, index=index).iloc[warm:]
     wins = sum(x > 0 for x in trade_pnl)
     return Result(label, float(equity[-1]), start_cash, float(1 - (curve / curve.cummax()).min()), trades, wins,

@@ -128,9 +128,9 @@ def confirm_live(cfg, assume_yes: bool) -> None:
 
 
 def check_price_feed(cfg) -> None:
-    from bot import data
-
     try:
+        from bot import data
+
         candles = data.fetch_recent(limit=3, exchange_id=cfg.candle_exchange)
         say(f"price feed OK: SOL/USDC {candles['close'].iloc[-1]:.2f}")
     except Exception as exc:
