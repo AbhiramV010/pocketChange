@@ -19,7 +19,7 @@ import pandas as pd
 
 from bot import chain, data, db, ml
 from bot.assets import ASSETS, PRIMARY, label
-from bot.config import FEE_RATE, MIN_TRADE_USDC, SLIPPAGE_RATE, TIMEFRAME, Settings, settings
+from bot.config import FEE_RATE, FIXED_COST_USD, MIN_TRADE_USDC, SLIPPAGE_RATE, TIMEFRAME, TIMEFRAMES, Settings, settings
 from bot.db import Balances, Fill
 from bot.strategy import Params, Signal, bars_since, buy_budget, dca_signal, decide, momentum, regime_ok, size_trade
 
@@ -98,11 +98,15 @@ class SimBroker:
                 raise chain.SwapFailed(f"buy of {amount_in} USDC exceeds MAX_TRADE_USDC={cap}")
             if amount_in > have.usdc + 1e-9:
                 raise chain.SwapFailed("insufficient simulated USDC")
-            out = amount_in * (1 - FEE_RATE) / (ref_price * (1 + SLIPPAGE_RATE))
+            if amount_in <= FIXED_COST_USD:
+                raise chain.SwapFailed(f"buy of {amount_in} USDC does not cover the fixed cost {FIXED_COST_USD}")
+            out = (amount_in - FIXED_COST_USD) * (1 - FEE_RATE) / (ref_price * (1 + SLIPPAGE_RATE))
             return Fill(amount_in, out, amount_in / out, None)
         if amount_in > have.qty(asset) + 1e-12:
             raise chain.SwapFailed(f"insufficient simulated {name}")
-        usdc_out = amount_in * ref_price * (1 - SLIPPAGE_RATE) * (1 - FEE_RATE)
+        usdc_out = max(0.0, amount_in * ref_price * (1 - SLIPPAGE_RATE) * (1 - FEE_RATE) - FIXED_COST_USD)
+        if usdc_out <= 0:
+            raise chain.SwapFailed(f"sell of {amount_in} {name} does not cover the fixed cost {FIXED_COST_USD}")
         if usdc_out > cap + 1e-9:
             raise chain.SwapFailed(f"sell of ~{usdc_out:.2f} USDC exceeds MAX_TRADE_USDC={cap}")
         return Fill(amount_in, usdc_out, usdc_out / amount_in, None)
@@ -146,12 +150,13 @@ def run_cycle(ctx: Context) -> None:
 
     paused, halted = db.is_paused(conn), db.is_halted(conn)  # top of the cycle (hard rule 6)
     risky_on = db.is_risky(conn, cfg.risky)
-    timeframe = db.get_timeframe(conn) or TIMEFRAME  # the dashboard can switch it live
 
     ctx.scores, ctx.ml_notice = {}, False
+    balances = ctx.broker.balances()
+    # The dashboard can switch the timeframe; the switch waits until the bot holds nothing.
+    timeframe = _active_timeframe(conn, db.get_timeframe(conn) or TIMEFRAME, balances)
     if ctx.models is not None:
         ctx.models.maybe_retrain(timeframe, now)  # background thread; never blocks the cycle
-    balances = ctx.broker.balances()
     held = {a for a, qty in balances.positions().items() if qty > 0}
     assets = list(cfg.assets) + [a for a in cfg.risky_assets if risky_on or a in held]
     markets = _markets(ctx, assets, now, timeframe)
@@ -208,6 +213,22 @@ def run_cycle(ctx: Context) -> None:
             if after is None:
                 break
             balances = after
+
+
+def _active_timeframe(conn: sqlite3.Connection, requested: str, balances: Balances) -> str:
+    """The timeframe to trade this cycle. A change waits while a position is open: entry price, bars held and
+    the stops were all measured on the old candles, so switching mid-trade would change what they mean."""
+    active = db.get_state(conn, db.ACTIVE_TIMEFRAME)
+    if active == requested:
+        return requested
+    if active in TIMEFRAMES:
+        marks = db.last_marks(conn)
+        # A coin with no known price counts as held: better to wait a cycle than to switch under a position.
+        if any(q > 0 and q * marks.get(a, math.inf) >= MIN_TRADE_USDC for a, q in balances.positions().items()):
+            log.info("timeframe change %s -> %s waits until open positions are closed", active, requested)
+            return active
+    db.set_state(conn, db.ACTIVE_TIMEFRAME, requested)
+    return requested
 
 
 def _closed_bench(markets: dict[str, tuple[pd.DataFrame, float | None]], now: datetime, timeframe: str) -> pd.DataFrame | None:
@@ -621,6 +642,12 @@ def main(argv: list[str] | None = None) -> None:
         "AI" if cfg.strategy == "ml" else "SMA", params.fast, params.slow, params.entry, params.edge_bps, params.confirm, params.stop_atr,
         params.hard_stop_pct, params.regime_len, cfg.max_positions,
     )
+    if FIXED_COST_USD > 0:
+        bps = FIXED_COST_USD / cfg.max_trade_usdc * 10_000
+        (log.warning if bps > 10 else log.info)(
+            "fixed cost $%.3f per swap is %.0f bps of a full-size $%g trade (and more of a smaller one); "
+            "under ~10 bps needs trades of $%.0f or more", FIXED_COST_USD, bps, cfg.max_trade_usdc, FIXED_COST_USD * 1000,
+        )
     if not cfg.dry_run:
         log.warning("LIVE MODE: real transactions will be sent from %s", getattr(broker, "address", "?"))
     if db.is_halted(conn):

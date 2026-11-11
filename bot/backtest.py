@@ -10,6 +10,7 @@ from bot import data, portfolio_backtest
 from bot.assets import ASSETS, PRIMARY
 from bot.config import (
     FEE_RATE,
+    FIXED_COST_USD,
     MIN_TRADE_USDC,
     SLIPPAGE_RATE,
     SYMBOL,
@@ -48,9 +49,9 @@ class Result:
         return portfolio_backtest.sharpe(self.equity)
 
 
-def _buy(cash: float, coin: float, spend: float, open_price: float, fee: float, slip: float):
+def _buy(cash: float, coin: float, spend: float, open_price: float, fee: float, slip: float, fixed: float = 0.0):
     fill = open_price * (1 + slip)
-    return cash - spend, coin + spend * (1 - fee) / fill
+    return cash - spend, coin + max(0.0, spend - fixed) * (1 - fee) / fill
 
 
 def _finish(name: str, start: float, candles: pd.DataFrame, cash: list, coin: list, trades: int) -> Result:
@@ -60,8 +61,11 @@ def _finish(name: str, start: float, candles: pd.DataFrame, cash: list, coin: li
     return Result(name, start, equity, exposure, trades)
 
 
-def buy_and_hold(candles: pd.DataFrame, start: float = START_USDC, fee: float = FEE_RATE, slip: float = SLIPPAGE_RATE) -> Result:
-    cash, coin = _buy(start, 0.0, start, float(candles["open"].iloc[0]), fee, slip)
+def buy_and_hold(
+    candles: pd.DataFrame, start: float = START_USDC, fee: float = FEE_RATE, slip: float = SLIPPAGE_RATE,
+    fixed: float = FIXED_COST_USD,
+) -> Result:
+    cash, coin = _buy(start, 0.0, start, float(candles["open"].iloc[0]), fee, slip, fixed)
     n = len(candles)
     return _finish("Buy & hold", start, candles, [cash] * n, [coin] * n, trades=1)
 
@@ -77,6 +81,7 @@ def simulate(
     dca_interval_hours: float,
     fee: float = FEE_RATE,
     slip: float = SLIPPAGE_RATE,
+    fixed: float = FIXED_COST_USD,
     params: Params | None = None,
     bench: pd.DataFrame | None = None,
 ) -> Result:
@@ -84,7 +89,7 @@ def simulate(
     if strategy == "sma":
         r = portfolio_backtest.simulate(
             {PRIMARY: candles}, params or Params(), bench=bench, label=name, start_cash=start,
-            trade_usdc=max_trade_usdc, max_positions=1, fee_rate=fee, slippage_rate=slip,
+            trade_usdc=max_trade_usdc, max_positions=1, fee_rate=fee, slippage_rate=slip, fixed_cost=fixed,
         )
         assert r.equity is not None and r.invested is not None
         return Result(name, start, r.equity, float(r.invested.div(r.equity).mean()), r.trades)
@@ -101,8 +106,8 @@ def simulate(
                 pending, strategy, usdc=cash, wsol=coin, price=price, max_trade_usdc=max_trade_usdc,
                 dca_amount_usdc=dca_amount_usdc, min_trade_usdc=MIN_TRADE_USDC,
             )
-            if amount > 0:
-                cash, coin = _buy(cash, coin, amount, price, fee, slip)
+            if amount > fixed:
+                cash, coin = _buy(cash, coin, amount, price, fee, slip, fixed)
                 last_buy = candles.index[t]
                 trades += 1
         cash_hist.append(cash)
@@ -143,7 +148,7 @@ def format_report(results: list[Result], candles: pd.DataFrame, cfg: Settings = 
         [
             f"{SYMBOL} {TIMEFRAME} backtest: {candles.index[0]:%Y-%m-%d %H:%M} -> {candles.index[-1]:%Y-%m-%d %H:%M} UTC "
             f"({len(candles)} candles)",
-            f"Start ${start:.2f} USDC | cost per trade: {FEE_RATE:.2%} fee + {SLIPPAGE_RATE:.2%} slippage | "
+            f"Start ${start:.2f} USDC | cost per trade: {FEE_RATE:.2%} fee + {SLIPPAGE_RATE:.2%} slippage + ${FIXED_COST_USD:g} fixed | "
             f"fills at next candle open",
             "",
             header,

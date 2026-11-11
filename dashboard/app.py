@@ -68,7 +68,7 @@ def set_timeframe() -> None:
         return
     with closing(db.connect(settings.db_path)) as conn:
         db.set_timeframe(conn, choice)
-    st.toast(f"Trading on {choice} candles from the next cycle.", icon=":material/schedule:")
+    st.toast(f"Trading on {choice} candles once the bot holds no position.", icon=":material/schedule:")
 
 
 def position_summary(trades: pd.DataFrame) -> tuple[float, float, float]:
@@ -274,13 +274,13 @@ def live_view() -> None:
     st.session_state["timeframe"] = timeframe  # always mirror the database
     st.segmented_control(
         "Timeframe",
-        DASHBOARD_TIMEFRAMES,
+        tuple(dict.fromkeys((timeframe, *DASHBOARD_TIMEFRAMES))),  # a shorter one already in use stays visible
         key="timeframe",
         on_change=set_timeframe,
         disabled=PUBLIC,
         label_visibility="collapsed",
-        help="Candle size the bot trades on. Shorter means more trades and more fees: in backtests every setting "
-        "below 4h lost money after costs.",
+        help="Candle size the bot trades on. Only 4h is offered: in backtests every shorter setting lost money "
+        "after costs. A change takes effect once the bot holds no position.",
     )
     st.divider()
 

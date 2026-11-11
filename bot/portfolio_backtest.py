@@ -18,7 +18,7 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
-from bot.config import FEE_RATE, MIN_TRADE_USDC, SLIPPAGE_RATE
+from bot.config import FEE_RATE, FIXED_COST_USD, MIN_TRADE_USDC, SLIPPAGE_RATE
 from bot.strategy import Params, Signal, buy_budget, decide_core, momentum, regime_ok, size_trade
 
 REGIME_ASSET = "BTC"  # the market filter looks at BTC, as in the live loop
@@ -120,6 +120,7 @@ def simulate(
     max_positions: int = 3,
     fee_rate: float = FEE_RATE,
     slippage_rate: float = SLIPPAGE_RATE,
+    fixed_cost: float = FIXED_COST_USD,
 ) -> Result:
     """Replay the live loop. Decisions at candle i use closes up to i; their orders fill at candle i+1's open.
 
@@ -168,7 +169,7 @@ def simulate(
                 )
                 if amount <= 0:
                     break
-                proceeds = amount * px * (1 - slippage_rate) * (1 - fee_rate)
+                proceeds = max(0.0, amount * px * (1 - slippage_rate) * (1 - fee_rate) - fixed_cost)
                 basis = cost[a] * amount / qty[a]
                 cash += proceeds
                 cost[a] -= basis
@@ -191,9 +192,9 @@ def simulate(
                 Signal.BUY, "sma", usdc=cash, wsol=qty[a], price=px, max_trade_usdc=min(trade_usdc, budget),
                 dca_amount_usdc=0.0, min_trade_usdc=MIN_TRADE_USDC,
             )
-            if spend <= 0:
+            if spend <= fixed_cost:
                 continue
-            bought = spend * (1 - fee_rate) / (px * (1 + slippage_rate))
+            bought = (spend - fixed_cost) * (1 - fee_rate) / (px * (1 + slippage_rate))
             fills.append((index[i], "buy", a, spend, bought))
             qty[a] += bought
             cost[a] += spend
@@ -241,7 +242,7 @@ def simulate(
 
 def buy_and_hold(
     candles: dict[str, pd.DataFrame], start_cash: float = 20.0, trade_usdc: float = 5.0,
-    fee_rate: float = FEE_RATE, slippage_rate: float = SLIPPAGE_RATE,
+    fee_rate: float = FEE_RATE, slippage_rate: float = SLIPPAGE_RATE, fixed_cost: float = FIXED_COST_USD,
 ) -> Result:
     """Equal-weight buy at the second candle's open (the first fill the bot could get), marked at every close."""
     candles = align(candles)
@@ -250,7 +251,7 @@ def buy_and_hold(
     cash = start_cash - share * len(assets)
     index = candles[assets[0]].index[1:]
     invested = sum(
-        share * (1 - fee_rate) / (candles[a]["open"].iloc[1] * (1 + slippage_rate)) * candles[a]["close"].iloc[1:]
+        max(0.0, share - fixed_cost) * (1 - fee_rate) / (candles[a]["open"].iloc[1] * (1 + slippage_rate)) * candles[a]["close"].iloc[1:]
         for a in assets
     )
     curve = pd.Series(cash + np.asarray(invested, float), index=index)

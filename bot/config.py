@@ -24,8 +24,9 @@ TIMEFRAMES = ("1m", "5m", "15m", "30m", "1h", "4h")
 TIMEFRAME = (os.environ.get("TIMEFRAME") or "4h").strip().lower()  # candle size for strategies and backtests
 SMA_FAST = int(os.environ.get("SMA_FAST") or 20)
 SMA_SLOW = int(os.environ.get("SMA_SLOW") or 50)
-# cross: buy/sell only on the candle where the averages cross (patient, few trades).
-# trend: be long whenever fast > slow, flat whenever fast < slow (aggressive, enters right away).
+# cross: buy only on the candle where the averages cross (patient, few trades).
+# trend: be long whenever fast > slow (aggressive, enters right away).
+# Either way a held position is sold whenever fast < slow, not only on the candle where they cross.
 ENTRY_MODES = ("cross", "trend")
 ENTRY = (os.environ.get("ENTRY") or "cross").strip().lower()
 EDGE_BPS = float(os.environ.get("EDGE_BPS") or 10)  # fast must beat slow by this much to enter
@@ -41,6 +42,8 @@ MIN_TRADE_USDC = 1.0  # below this a trade is not worth the fees
 FEE_RATE = 0.003
 SLIPPAGE_RATE = 0.001
 ROUND_TRIP_COST = 2 * (FEE_RATE + SLIPPAGE_RATE)  # buy and sell, each with fee and slippage
+# Network cost of one swap in USD (base fee plus priority fee), charged per trade whatever its size.
+FIXED_COST_USD = float(os.environ.get("FIXED_COST_USD") or 0.03)
 
 STRATEGIES = ("sma", "dca", "ml")
 
@@ -59,9 +62,11 @@ if REENTRY_CANDLES < 0 or not 0 <= REGIME_LEN <= 1000:
     raise ConfigError("REENTRY_CANDLES must be >= 0 and REGIME_LEN in [0, 1000]")
 if not 0 <= RISK_PCT <= 10:
     raise ConfigError("RISK_PCT must be in [0, 10]")
+if not 0 <= FIXED_COST_USD < MIN_TRADE_USDC:
+    raise ConfigError(f"FIXED_COST_USD must be in [0, {MIN_TRADE_USDC:g})")
 if TIMEFRAME not in TIMEFRAMES:
     raise ConfigError(f"TIMEFRAME must be one of {TIMEFRAMES}, got {TIMEFRAME!r}")
-DASHBOARD_TIMEFRAMES = ("1m", "5m", "15m", "30m", "1h", "4h")  # choices on the dashboard switch
+DASHBOARD_TIMEFRAMES = ("4h",)  # choices on the dashboard switch; everything shorter lost money after costs
 
 
 def candle_freq(timeframe: str) -> str:
@@ -131,7 +136,7 @@ class Settings:
     risky_assets: tuple[str, ...] = ()  # memecoins traded only while the dashboard RISKY switch is on
     max_positions: int = 3  # open positions across all assets at once
     risky: bool = False  # initial state of the RISKY switch (the dashboard can flip it later)
-    sniper: bool = True  # RISKY mode also snipes brand-new tokens (simulation only)
+    sniper: bool = False  # opt in: RISKY mode also snipes brand-new tokens (simulation only)
     sniper_bankroll_usdc: float = 10.0
     sniper_trade_usdc: float = 2.0
     sniper_max_open: int = 3
@@ -236,7 +241,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         risky_assets=_symbols(env, "RISKY_ASSETS", ()),
         max_positions=_number(env, "MAX_POSITIONS", defaults.max_positions, int),
         risky=_bool(env, "RISKY", False),
-        sniper=_bool(env, "SNIPER", True),
+        sniper=_bool(env, "SNIPER", False),
         sniper_bankroll_usdc=_number(env, "SNIPER_BANKROLL_USDC", defaults.sniper_bankroll_usdc),
         sniper_trade_usdc=_number(env, "SNIPER_TRADE_USDC", defaults.sniper_trade_usdc),
         sniper_max_open=_number(env, "SNIPER_MAX_OPEN", defaults.sniper_max_open, int),

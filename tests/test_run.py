@@ -116,6 +116,7 @@ def test_a_capped_sell_keeps_selling_on_later_candles_even_when_the_rule_says_ho
 def test_a_position_bigger_than_the_capped_sell_left_is_not_dumped(conn, monkeypatch):
     """A live buy that landed after an unknown outcome (or a manual top-up) is not a leftover of the last sell."""
     monkeypatch.setattr("bot.run.MAX_SELL_CHUNKS", 1)  # an exit cut short (say, a failed swap) leaves a remainder
+    monkeypatch.setattr("bot.strategy.trend_down", lambda *_: False)  # isolate the leftover rule from the trend exit
     closes = sell_signal_series()
     price = closes[-1]
     db.insert_trade(conn, "buy", db.Fill(15.0, 15.0 / price, price, None), simulated=True, timestamp=SETUP)
@@ -136,6 +137,7 @@ def test_a_position_bigger_than_the_capped_sell_left_is_not_dumped(conn, monkeyp
 
 def test_a_dry_run_sell_never_makes_the_live_bot_sell(conn, monkeypatch):
     monkeypatch.setattr("bot.run.MAX_SELL_CHUNKS", 1)  # an exit cut short (say, a failed swap) leaves a remainder
+    monkeypatch.setattr("bot.strategy.trend_down", lambda *_: False)  # isolate the leftover rule from the trend exit
     closes = sell_signal_series()
     price = closes[-1]
     db.insert_trade(conn, "buy", db.Fill(15.0, 15.0 / price, price, None), simulated=True, timestamp=SETUP)

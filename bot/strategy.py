@@ -64,6 +64,13 @@ def sma_signal(closes: np.ndarray, p: Params) -> Signal:
     return Signal.HOLD
 
 
+def trend_down(closes: np.ndarray, p: Params) -> bool:
+    """True while the fast average is under the slow one on the latest closed candle."""
+    if len(closes) < p.slow:
+        return False
+    return bool(closes[-p.fast:].mean() < closes[-p.slow:].mean())  # a NaN compares False
+
+
 def regime_ok(btc_closes: np.ndarray, p: Params) -> bool:
     """Market filter: risk-on only while BTC trades above its long moving average."""
     if p.regime_len <= 0:
@@ -134,10 +141,12 @@ def decide_core(
 ) -> Signal:
     """The whole SMA rule for one asset on closed candles. The live loop (via `decide`) and the backtest call this.
 
-    `exiting` means an earlier sell was capped by MAX_TRADE_USDC and left a position: keep selling until flat."""
+    `exiting` means an earlier sell was capped by MAX_TRADE_USDC and left a position: keep selling until flat.
+    A held position is sold on any candle where fast < slow, not only the one where they cross: if the bot was
+    down or the feed was stale for the cross candle, the exit still fires on the next cycle that sees candles."""
     signal = sma_signal(close, p)
     if holding:
-        if exiting or stop_hit(high, low, close, entry_price, bars_held, p):
+        if exiting or stop_hit(high, low, close, entry_price, bars_held, p) or trend_down(close, p):
             return Signal.SELL
         return signal
     if signal is Signal.BUY and p.entry == "trend" and not trend_reset_since(close, p, bars_since_sell):

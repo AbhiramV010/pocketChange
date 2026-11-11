@@ -6,6 +6,7 @@ from pathlib import Path
 os.environ.update(
     STRATEGY="sma", TIMEFRAME="1h", SMA_FAST="20", SMA_SLOW="50", ENTRY="cross", EDGE_BPS="0", TREND_CONFIRM="false",
     STOP_ATR="0", HARD_STOP_PCT="0", REENTRY_CANDLES="0", REGIME_LEN="0", RISK_PCT="0", ASSETS="SOL", RISKY_ASSETS="", RISKY="false", LOOP_INTERVAL_SECONDS="60",
+    FIXED_COST_USD="0", SNIPER="true",  # exact-number tests predate the fixed cost; the sniper is opt-in
 )
 
 import pytest

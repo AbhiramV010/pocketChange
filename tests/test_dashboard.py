@@ -196,9 +196,10 @@ def test_timeframe_switch_writes_only_the_timeframe(app):
     switch = at.get("button_group")[0]
     assert switch.value == "1h"
     before = dict(conn.execute("SELECT key, value FROM state").fetchall())
-    switch.set_value("5m").run()
+    assert switch.options == ["1h", "4h"]  # the one in use plus 4h; nothing shorter is offered
+    switch.set_value("4h").run()
     after = dict(conn.execute("SELECT key, value FROM state").fetchall())
-    assert db.get_timeframe(conn) == "5m"
+    assert db.get_timeframe(conn) == "4h"
     assert {k for k in set(before) | set(after) if before.get(k) != after.get(k)} == {db.TIMEFRAME}
 
 

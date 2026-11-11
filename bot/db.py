@@ -84,6 +84,7 @@ HALT_EXITS = "halt_exits"  # "1": the halt still lets stops and sell signals clo
 DRY_RUN = "dry_run"
 HEARTBEAT = "heartbeat"
 TIMEFRAME = "timeframe"
+ACTIVE_TIMEFRAME = "active_timeframe"  # what the bot last traded on; a switch waits until it is flat
 DONE_SIGNAL = "done_signal"
 ATTEMPT_SIGNAL = "attempt_signal"
 ATTEMPT_COUNT = "attempt_count"

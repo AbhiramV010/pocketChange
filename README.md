@@ -49,7 +49,7 @@ SOL, BTC, ETH, BNB, XRP, DOGE from Binance; $20 start, $5 cap per trade, up to 6
 What this does and does not show:
 - On 4h the rules beat buy & hold with a quarter of its drawdown, and nearby settings (10/30, 2–4 ATR stops, `REGIME_LEN=200`, 3 positions, +AVAX, +memecoins) were positive too. Only 30/80 lost (−2%).
 - The edge is trend following: it made its money in the 2024–25 rally and mostly sat out the 2025–26 decline (−3% while the coins fell 24%). It is long-only, so a long bear market means flat at best.
-- Below 4h, every setting lost after costs; trend mode did worse than cross mode almost everywhere. The dashboard still offers short timeframes, at your own risk.
+- Below 4h, every setting lost after costs; trend mode did worse than cross mode almost everywhere. The dashboard switch offers 4h only; a shorter `TIMEFRAME` in `.env` is for research.
 - One 2.8-year history, $5 positions, simulated fills. Run the dry run first and fund only what you can lose.
 
 ## Before going live
